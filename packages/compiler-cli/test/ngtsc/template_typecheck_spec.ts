@@ -5392,6 +5392,47 @@ runInEachFileSystem(() => {
           expect(diags[0].messageText).toContain(`not assignable to type 'number'`);
         });
 
+        for (const initialValue of ['1', "'wrong'"]) {
+          it(`should check the value of a two-way bound signal initialized to ${initialValue}`, () => {
+            const module = typedManifest.modules[0];
+            env.write(
+              'custom-elements.json',
+              JSON.stringify({
+                ...typedManifest,
+                modules: [
+                  {
+                    ...module,
+                    declarations: [
+                      {
+                        ...module.declarations[0],
+                        events: [{name: 'countChange', type: {text: 'any'}}],
+                      },
+                    ],
+                  },
+                ],
+              }),
+            );
+            env.write(
+              'test.ts',
+              `
+              import {Component, signal} from '@angular/core';
+              @Component({template: '<my-button [(count)]="value"></my-button>'})
+              export class SignalBinding { value = signal(${initialValue}); }
+            `,
+            );
+
+            const diagnostics = env.driveDiagnostics();
+            if (initialValue === '1') {
+              expect(diagnostics).toEqual([]);
+            } else {
+              expect(diagnostics.length).toBe(1);
+              expect(diagnostics[0].messageText).toContain(
+                "Type 'string' is not assignable to type 'number'",
+              );
+            }
+          });
+        }
+
         it('should report bindings whose value does not match a literal union type', () => {
           writeComponent(`<my-button [variant]="\\'tertiary\\'"></my-button>`);
           const diags = env.driveDiagnostics();

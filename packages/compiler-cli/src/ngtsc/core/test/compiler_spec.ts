@@ -625,6 +625,88 @@ runInEachFileSystem(() => {
         expect(compilerB.getDiagnosticsForFile(componentSf, OptimizeFor.WholeProgram)).toEqual([]);
       });
 
+      for (const entry of ['@my/lib', '@my/lib/custom-elements.json']) {
+        it(`should reload ${entry} when its package.json mapping changes`, () => {
+          const COMPONENT = _('/cmp.ts');
+          const PACKAGE_JSON = _('/node_modules/@my/lib/package.json');
+          const manifest = (tagName: string) =>
+            JSON.stringify({
+              schemaVersion: '1.0.0',
+              modules: [
+                {
+                  kind: 'javascript-module',
+                  path: 'element.js',
+                  declarations: [
+                    {kind: 'class', name: 'ElementClass', customElement: true, tagName},
+                  ],
+                  exports: [
+                    {
+                      kind: 'custom-element-definition',
+                      name: tagName,
+                      declaration: {name: 'ElementClass'},
+                    },
+                  ],
+                },
+              ],
+            });
+          fs.writeFile(
+            COMPONENT,
+            `
+          import {Component} from '@angular/core';
+          @Component({template: '<new-element></new-element>'})
+          export class Cmp {}
+        `,
+          );
+          fs.ensureDir(_('/node_modules/@my/lib'));
+          fs.writeFile(_('/node_modules/@my/lib/old.json'), manifest('old-element'));
+          fs.writeFile(_('/node_modules/@my/lib/new.json'), manifest('new-element'));
+          const packageMetadata = (target: string) =>
+            JSON.stringify({
+              name: '@my/lib',
+              ...(entry.endsWith('.json')
+                ? {exports: {'./custom-elements.json': target}}
+                : {customElements: target}),
+            });
+          fs.writeFile(PACKAGE_JSON, packageMetadata('./old.json'));
+          const options: NgCompilerOptions = {
+            strictTemplates: true,
+            basePath: _('/'),
+            module: ts.ModuleKind.ESNext,
+            moduleResolution: ts.ModuleResolutionKind.Bundler,
+            customElementsManifests: [entry],
+          };
+          const baseHost = new NgtscCompilerHost(getFileSystem(), options);
+          const host = NgCompilerHost.wrap(baseHost, [COMPONENT], options, /* oldProgram */ null);
+          const program = ts.createProgram({host, options, rootNames: host.inputFiles});
+          const compilerA = makeFreshCompiler(
+            host,
+            options,
+            program,
+            new TsCreateProgramDriver(program, host, options, []),
+            new NoopIncrementalBuildStrategy(),
+            /** enableTemplateTypeChecker */ false,
+            /* usePoisonedData */ false,
+          );
+          const componentSf = getSourceFileOrError(program, COMPONENT);
+          expect(
+            compilerA.getDiagnosticsForFile(componentSf, OptimizeFor.WholeProgram).length,
+          ).toBe(1);
+          expect(compilerA.getResourceDependencies(componentSf)).toContain(PACKAGE_JSON);
+
+          fs.writeFile(PACKAGE_JSON, packageMetadata('./new.json'));
+          const compilerB = NgCompiler.fromTicket(
+            resourceChangeTicket(compilerA, new Set([PACKAGE_JSON])),
+            host,
+          );
+          expect(compilerB.getDiagnosticsForFile(componentSf, OptimizeFor.WholeProgram)).toEqual(
+            [],
+          );
+          expect(compilerB.getResourceDependencies(componentSf)).toContain(
+            _('/node_modules/@my/lib/new.json'),
+          );
+        });
+      }
+
       it('should reuse the full compilation state for a resource-only change', () => {
         const COMPONENT = _('/cmp.ts');
         const TEMPLATE = _('/template.html');

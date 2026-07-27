@@ -2284,6 +2284,40 @@ describe('completions', () => {
     });
   });
 
+  describe('native binding name completion compatibility', () => {
+    for (const binding of ['[tit]', '[attr.tit]', '[class.tit]', '[(tit)]']) {
+      it(`should retain native property snippets in an empty ${binding} binding`, () => {
+        const {templateFile} = setup(`<input ${binding}="">`, '');
+        templateFile.moveCursorToText('tit¦');
+        const completions = templateFile.getCompletionsAtPosition({
+          includeCompletionsWithSnippetText: true,
+          includeCompletionsWithInsertText: true,
+        });
+        const entry = completions?.entries.find((entry) => entry.name === '[title]');
+        expect(entry?.insertText).toBe('[title]="$1"');
+        expect(entry?.isSnippet).toBe(true);
+      });
+    }
+
+    for (const snippets of [false, true]) {
+      it(`should retain directive completions in a populated native attr binding with snippets=${snippets}`, () => {
+        const {templateFile} = setup(`<input dir [attr.my]="'value'">`, '', DIR_WITH_INPUT);
+        templateFile.moveCursorToText('attr.my¦');
+        const completions = templateFile.getCompletionsAtPosition({
+          includeCompletionsWithSnippetText: snippets,
+          includeCompletionsWithInsertText: snippets,
+        });
+        const entry = completions?.entries.find((entry) => entry.name === 'myInput');
+        expect(entry).toBeDefined();
+        expect(entry?.isSnippet).toBeUndefined();
+        expect(entry?.replacementSpan).toEqual({
+          start: templateFile.contents.indexOf('attr.my'),
+          length: 'attr.my'.length,
+        });
+      });
+    }
+  });
+
   describe('custom elements manifest completions', () => {
     function setupWithManifest(
       template: string,
@@ -2479,6 +2513,57 @@ describe('completions', () => {
       templateFile.moveCursorToText('<my-button ¦>');
       const completions = templateFile.getCompletionsAtPosition();
       expectContain(completions, DisplayInfoKind.EVENT, ['(itemselect)', '(click)']);
+    });
+
+    for (const snippets of [false, true]) {
+      it(`should complete an existing manifest property binding with snippets=${snippets}`, () => {
+        const templateFile = setupWithManifest(`<my-button [lab]="'text'"></my-button>`);
+        templateFile.moveCursorToText('[lab¦]');
+        const completions = templateFile.getCompletionsAtPosition({
+          includeCompletionsWithSnippetText: snippets,
+          includeCompletionsWithInsertText: snippets,
+        })!;
+        const entry = completions.entries.find((entry) => entry.name === 'label')!;
+        expect(entry).toBeDefined();
+        const {start, length} = entry.replacementSpan!;
+        expect(templateFile.contents.slice(start, start + length)).toBe('lab');
+        expect(toText(templateFile.getCompletionEntryDetails('label')!.documentation)).toBe(
+          'The button label.',
+        );
+        expect(completions.entries.some((entry) => entry.name.includes('data-mode'))).toBe(false);
+      });
+
+      it(`should complete an existing manifest attribute binding with snippets=${snippets}`, () => {
+        const templateFile = setupWithManifest(
+          `<my-button [attr.button-lab]="'text'"></my-button>`,
+        );
+        templateFile.moveCursorToText('[attr.button-lab¦]');
+        const completions = templateFile.getCompletionsAtPosition({
+          includeCompletionsWithSnippetText: snippets,
+          includeCompletionsWithInsertText: snippets,
+        })!;
+        const entry = completions.entries.find((entry) => entry.name === 'attr.button-label')!;
+        expect(entry).toBeDefined();
+        const {start, length} = entry.replacementSpan!;
+        expect(templateFile.contents.slice(start, start + length)).toBe('attr.button-lab');
+        expect(toText(templateFile.getCompletionEntryDetails(entry.name)!.documentation)).toBe(
+          'The label attribute.',
+        );
+        expect(completions.entries.every((entry) => entry.name.startsWith('attr.'))).toBe(true);
+      });
+    }
+
+    it('should retain attribute syntax when completing an empty binding with a snippet', () => {
+      const templateFile = setupWithManifest(`<my-button [attr.data-m]=""></my-button>`);
+      templateFile.moveCursorToText('[attr.data-m¦]');
+      const completions = templateFile.getCompletionsAtPosition({
+        includeCompletionsWithSnippetText: true,
+        includeCompletionsWithInsertText: true,
+      })!;
+      const entry = completions.entries.find((entry) => entry.name === '[attr.data-mode]')!;
+      expect(entry.insertText).toBe('[attr.data-mode]="$1"');
+      const {start, length} = entry.replacementSpan!;
+      expect(templateFile.contents.slice(start, start + length)).toBe('[attr.data-m]=""');
     });
 
     it('should preserve property and event completions with the same name and their documentation', () => {
