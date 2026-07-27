@@ -32,6 +32,21 @@
           "default": true,
           "description": "Whether the compiler should avoid generating code for classes that haven't been exported."
         },
+        "customElementsManifests": {
+          "type": "array",
+          "description": "Custom Elements Manifest files that describe the web components used in templates. Each entry is a path starting with ./ or ../ (relative to the tsconfig being compiled), an absolute path, a .json module specifier such as @my/lib/custom-elements.json, or a package name whose package.json has a customElements field.",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "\\S"
+          }
+        },
+        "customElementsManifestsDiagnostics": {
+          "type": "string",
+          "enum": ["summary", "verbose"],
+          "default": "summary",
+          "description": "How Custom Elements Manifest warnings are reported. 'summary' combines warnings of the same kind for each manifest into one warning with a count and examples. 'verbose' reports each problem separately."
+        },
         "disableTypeScriptVersionCheck": {
           "type": "boolean",
           "description": "Disable TypeScript Version Check."
