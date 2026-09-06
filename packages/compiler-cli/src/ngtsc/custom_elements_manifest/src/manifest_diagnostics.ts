@@ -105,7 +105,10 @@ export function declarationWarningDiagnostics(
 }
 
 export function formatQuotedList(values: Set<string>): string {
-  return Array.from(values, (value) => `'${value}'`).join(values.size === 2 ? ' and ' : ', ');
+  const quoted = Array.from(values, (value) => `'${value}'`);
+  return quoted.length < 3
+    ? quoted.join(' and ')
+    : `${quoted.slice(0, -1).join(', ')}, and ${quoted[quoted.length - 1]}`;
 }
 
 function warningErrorCode(kind: ManifestWarning['kind']): ErrorCode {

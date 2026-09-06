@@ -430,6 +430,90 @@ runInEachFileSystem(() => {
     });
 
     describe('resource-only changes', () => {
+      it('should share type-resolution lookups across manifests after a resource change', () => {
+        const COMPONENT = _('/cmp.ts');
+        const PACKAGE_JSON = _('/node_modules/types-library/package.json');
+        fs.writeFile(COMPONENT, 'export {};');
+        fs.ensureDir(_('/node_modules/types-library'));
+        fs.writeFile(PACKAGE_JSON, '{"types":"./index.d.ts"}');
+        fs.writeFile(_('/node_modules/types-library/index.d.ts'), 'export type Choice = string;');
+        const manifests = [_('/first.json'), _('/second.json')];
+        for (const [index, path] of manifests.entries()) {
+          fs.writeFile(
+            path,
+            JSON.stringify({
+              schemaVersion: '1.0.0',
+              modules: [
+                {
+                  kind: 'javascript-module',
+                  path: 'element.js',
+                  declarations: [
+                    {
+                      kind: 'class',
+                      name: 'Element',
+                      customElement: true,
+                      tagName: `element-${index}`,
+                      members: [
+                        {
+                          kind: 'field',
+                          name: 'value',
+                          type: {
+                            text: 'Choice',
+                            references: [{name: 'Choice', package: 'types-library'}],
+                          },
+                        },
+                      ],
+                    },
+                  ],
+                  exports: [
+                    {
+                      kind: 'custom-element-definition',
+                      name: `element-${index}`,
+                      declaration: {name: 'Element'},
+                    },
+                  ],
+                },
+              ],
+            }),
+          );
+        }
+        const options: NgCompilerOptions = {
+          noLib: true,
+          basePath: _('/'),
+          module: ts.ModuleKind.ESNext,
+          moduleResolution: ts.ModuleResolutionKind.Bundler,
+          customElementsManifests: manifests,
+        };
+        const baseHost = new NgtscCompilerHost(fs, options);
+        const reads = spyOn(baseHost, 'readFile').and.callThrough();
+        const packageReads = () =>
+          reads.calls.allArgs().filter(([path]) => path === PACKAGE_JSON).length;
+        const host = NgCompilerHost.wrap(baseHost, [COMPONENT], options, null);
+        const program = ts.createProgram({host, options, rootNames: host.inputFiles});
+        const compiler = makeFreshCompiler(
+          host,
+          options,
+          program,
+          new TsCreateProgramDriver(program, host, options, []),
+          new NoopIncrementalBuildStrategy(),
+          false,
+          false,
+        );
+        expect(compiler.getOptionDiagnostics()).toEqual([]);
+        const initialPackageReads = packageReads();
+        expect(initialPackageReads).toBeGreaterThan(0);
+
+        reads.calls.reset();
+        fs.writeFile(manifests[0], fs.readFile(manifests[0]) + '\n');
+        const updated = NgCompiler.fromTicket(
+          resourceChangeTicket(compiler, new Set([manifests[0]])),
+          host,
+        );
+        expect(updated.getOptionDiagnostics()).toEqual([]);
+        expect(packageReads()).toBeGreaterThan(0);
+        expect(packageReads()).toBeLessThanOrEqual(initialPackageReads);
+      });
+
       it('should reload a changed manifest before the first analysis', () => {
         const COMPONENT = _('/cmp.ts');
         const MANIFEST = _('/custom-elements.json');

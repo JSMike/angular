@@ -576,8 +576,14 @@ export class NgCompiler {
    * and incremental invalidation.
    */
   private loadCustomElementsManifestSchemas(
-    moduleResolutionCache: ts.ModuleResolutionCache | null,
+    moduleResolutionCache?: ts.ModuleResolutionCache,
   ): void {
+    // Each resource reload needs fresh package metadata and a cache shared by its manifests.
+    moduleResolutionCache ??= ts.createModuleResolutionCache(
+      this.adapter.getCurrentDirectory(),
+      this.adapter.getCanonicalFileName.bind(this.adapter),
+      this.options,
+    );
     const manifestResult = loadCustomElementsManifests(
       this.customElementsManifests,
       resolve(this.options['basePath'] ?? this.adapter.getCurrentDirectory()),
@@ -619,8 +625,7 @@ export class NgCompiler {
       if (manifestChanged) {
         // Reload schemas and invalidate component TCBs. Keep the compilation because a resource
         // update cannot recreate its finalized semantic dependency graph.
-        this.loadCustomElementsManifestSchemas(null);
-        this.resourceManager.invalidate();
+        this.loadCustomElementsManifestSchemas();
         if (this.compilation !== null) {
           this.compilation.templateTypeChecker.updateCustomElementsManifestIndex(
             this.customElementsManifestIndex,

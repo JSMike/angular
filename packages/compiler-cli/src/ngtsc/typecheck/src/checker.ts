@@ -115,17 +115,17 @@ import {
 } from './context';
 import {shouldReportDiagnostic, translateDiagnostic} from './diagnostics';
 import {REGISTRY} from './dom';
+import {TypeCheckShimGenerator} from './shim';
+import {DirectiveSourceManager} from './source';
+import {findTypeCheckBlock, getSourceMapping, TypeCheckSourceResolver} from './tcb_util';
+import {SymbolBoundTarget, SymbolBuilder, SymbolDirectiveMeta} from './template_symbol_builder';
+import {TCB_FUNCTION_PREFIX} from './type_check_file';
 
 /** DOM schema registries extended with manifest-declared custom elements, one per manifest index. */
 const CUSTOM_ELEMENTS_MANIFEST_REGISTRIES = new WeakMap<
   CustomElementsManifestIndex,
   DomElementSchemaRegistry
 >();
-import {TypeCheckShimGenerator} from './shim';
-import {DirectiveSourceManager} from './source';
-import {findTypeCheckBlock, getSourceMapping, TypeCheckSourceResolver} from './tcb_util';
-import {SymbolBoundTarget, SymbolBuilder, SymbolDirectiveMeta} from './template_symbol_builder';
-import {TCB_FUNCTION_PREFIX} from './type_check_file';
 
 export class TypeCheckableDirectiveMetaAdapter implements SymbolDirectiveMeta {
   constructor(

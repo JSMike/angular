@@ -969,6 +969,13 @@ runInEachFileSystem(() => {
                         references: [{name: 'MissingEvent', package: '@ce/lib'}],
                       },
                     },
+                    {
+                      name: 'cancel',
+                      type: {
+                        text: 'MissingOther',
+                        references: [{name: 'MissingOther', package: '@ce/lib'}],
+                      },
+                    },
                   ],
                 },
               ],
@@ -997,10 +1004,7 @@ runInEachFileSystem(() => {
         ),
       ).toBe(true);
       expect(result.diagnostics.map((diagnostic) => diagnostic.messageText).join('\n')).toContain(
-        `'Missing'`,
-      );
-      expect(result.diagnostics.map((diagnostic) => diagnostic.messageText).join('\n')).toContain(
-        `'MissingEvent'`,
+        `'Missing', 'MissingEvent', and 'MissingOther'`,
       );
       expect(result.diagnostics.map((diagnostic) => diagnostic.messageText).join('\n')).toContain(
         `'MissingElement'`,
@@ -1014,6 +1018,7 @@ runInEachFileSystem(() => {
         schema.properties.find((property) => property.name === 'missing')!.checkType,
       ).toBeUndefined();
       expect(schema.events[0].checkType).toBeUndefined();
+      expect(schema.events[1].checkType).toBeUndefined();
       expect(schema.instanceCheckType).toBeUndefined();
     });
 
