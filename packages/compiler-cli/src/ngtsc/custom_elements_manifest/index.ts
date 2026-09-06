@@ -7,4 +7,4 @@
  */
 
 export {loadCustomElementsManifests} from './src/loader';
-export {CustomElementsManifestsDiagnosticsMode} from './src/load_context';
+export {CustomElementsManifestsDiagnosticsMode} from './src/manifest_diagnostics';

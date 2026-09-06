@@ -11,11 +11,14 @@ import {
   AttributeRecord,
   CemDeclaration,
   EventRecord,
+  isObject,
   ManifestCheckType,
+  MAX_TYPE_TEXT_LENGTH,
   ParseContext,
   PropertyRecord,
+  ParsedCustomElementSchema,
+  typeTextOf,
 } from './schema';
-import {isObject, MAX_TYPE_TEXT_LENGTH, typeTextOf} from './type_text';
 
 /**
  * The validated element instance type for a declaration exported as `importedName` from
@@ -48,26 +51,13 @@ export function instanceCheckType(
 export function extractDeclarationSchema(
   {node: declaration, modulePath: containingModule}: CemDeclaration,
   tagName: string,
-  {
-    properties,
-    attributes,
-    events,
-  }: {
-    properties: Map<string, PropertyRecord>;
-    attributes: Map<string, AttributeRecord>;
-    events: Map<string, EventRecord>;
-  },
   context: ParseContext,
-): void {
+): Pick<ParsedCustomElementSchema, 'properties' | 'attributes' | 'events'> {
+  const properties = new Map<string, PropertyRecord>();
+  const attributes = new Map<string, AttributeRecord>();
+  const events = new Map<string, EventRecord>();
   const {manifestLabel, warnings} = context;
-  const membersByName = new Map<string, {[key: string]: unknown}>();
-  if (Array.isArray(declaration['members'])) {
-    for (const member of declaration['members']) {
-      if (isObject(member) && member['kind'] === 'field' && typeof member['name'] === 'string') {
-        membersByName.set(member['name'], member);
-      }
-    }
-  }
+  const memberNames = new Set<string>();
   const declaredAttributeNames = new Set(
     Array.isArray(declaration['attributes'])
       ? declaration['attributes']
@@ -82,6 +72,7 @@ export function extractDeclarationSchema(
         continue;
       }
       const memberName = member['name'];
+      memberNames.add(memberName);
       const invalidModifier = invalidFieldModifier(member);
       if (invalidModifier !== null) {
         warnings.push({
@@ -95,36 +86,23 @@ export function extractDeclarationSchema(
         });
         continue;
       }
-      let typeRecord: ReturnType<typeof toTypeRecord> | null = null;
-      const getTypeRecord = (): ReturnType<typeof toTypeRecord> =>
-        (typeRecord ??= toTypeRecord(member, containingModule, {
-          context,
-          tagName,
-          declarationKind: 'member',
-          declarationName: memberName,
-        }));
-      if (typeof member['attribute'] === 'string' && member['attribute'].length > 0) {
-        if (declaredAttributeNames.has(member['attribute'])) {
-          attributes.set(member['attribute'], {
-            ...getTypeRecord(),
-            ...readDocs(member),
-          });
-        } else {
-          warnings.push({
-            kind: 'invalidStructure',
-            subject: `${tagName}.${memberName}`,
-            message:
-              `${manifestLabel} associates the member '${memberName}' on '${tagName}' with the ` +
-              `attribute '${member['attribute']}', but that attribute is missing from the ` +
-              `declaration's attributes array. The member remains available, but Angular does ` +
-              `not synthesize the missing attribute declaration.`,
-          });
-        }
+      const attribute =
+        typeof member['attribute'] === 'string' && member['attribute'].length > 0
+          ? member['attribute']
+          : null;
+      const hasAttribute = attribute !== null && declaredAttributeNames.has(attribute);
+      if (attribute !== null && !hasAttribute) {
+        warnings.push({
+          kind: 'invalidStructure',
+          subject: `${tagName}.${memberName}`,
+          message:
+            `${manifestLabel} associates the member '${memberName}' on '${tagName}' with the ` +
+            `attribute '${attribute}', but that attribute is missing from the ` +
+            `declaration's attributes array. The member remains available, but Angular does ` +
+            `not synthesize the missing attribute declaration.`,
+        });
       }
-      if (
-        member['reflects'] === true &&
-        (typeof member['attribute'] !== 'string' || member['attribute'].length === 0)
-      ) {
+      if (member['reflects'] === true && attribute === null) {
         warnings.push({
           kind: 'invalidStructure',
           subject: `${tagName}.${memberName}`,
@@ -134,19 +112,30 @@ export function extractDeclarationSchema(
             `available as a property, but Angular does not synthesize an attribute.`,
         });
       }
-      if (
-        member['static'] === true ||
-        member['privacy'] === 'private' ||
-        member['privacy'] === 'protected' ||
+      const isBindable =
+        member['static'] !== true &&
+        member['privacy'] !== 'private' &&
+        member['privacy'] !== 'protected' &&
         // Exclude readonly fields so the schema checker rejects bindings that assign to them.
-        member['readonly'] === true
-      ) {
+        member['readonly'] !== true;
+      if (!isBindable && !hasAttribute) {
         continue;
       }
-      properties.set(memberName, {
-        ...getTypeRecord(),
+      const record = {
+        ...toTypeRecord(member, containingModule, {
+          context,
+          tagName,
+          declarationKind: 'member',
+          declarationName: memberName,
+        }),
         ...readDocs(member),
-      });
+      };
+      if (hasAttribute) {
+        attributes.set(attribute, record);
+      }
+      if (isBindable) {
+        properties.set(memberName, record);
+      }
     }
   }
 
@@ -155,16 +144,13 @@ export function extractDeclarationSchema(
       if (!isObject(attribute) || typeof attribute['name'] !== 'string') {
         continue;
       }
-      const inheritedAttribute = attributes.get(attribute['name']);
       const hasExplicitType = Object.prototype.hasOwnProperty.call(attribute, 'type');
       const requestedFieldName =
         typeof attribute['fieldName'] === 'string' && attribute['fieldName'].length > 0
           ? attribute['fieldName']
           : undefined;
-      const relatedMember =
-        requestedFieldName === undefined ? undefined : membersByName.get(requestedFieldName);
       const hasValidFieldRelationship =
-        requestedFieldName === undefined || relatedMember !== undefined;
+        requestedFieldName === undefined || memberNames.has(requestedFieldName);
       if (!hasValidFieldRelationship) {
         warnings.push({
           kind: 'invalidStructure',
@@ -176,16 +162,15 @@ export function extractDeclarationSchema(
             `and any inherited member type are ignored.`,
         });
       }
-      const inheritedWithoutType =
-        inheritedAttribute === undefined
-          ? undefined
-          : (({checkType: _checkType, typeText: _typeText, ...rest}) => rest)(inheritedAttribute);
+      let inheritedAttribute = hasValidFieldRelationship
+        ? attributes.get(attribute['name'])
+        : undefined;
+      if (hasExplicitType && inheritedAttribute !== undefined) {
+        const {checkType: _checkType, typeText: _typeText, ...metadata} = inheritedAttribute;
+        inheritedAttribute = metadata;
+      }
       attributes.set(attribute['name'], {
-        ...(hasValidFieldRelationship
-          ? hasExplicitType
-            ? inheritedWithoutType
-            : inheritedAttribute
-          : undefined),
+        ...inheritedAttribute,
         ...toTypeRecord(attribute, containingModule, {
           context,
           tagName,
@@ -225,6 +210,11 @@ export function extractDeclarationSchema(
       });
     }
   }
+  return {
+    properties: Array.from(properties, ([name, record]) => ({name, ...record})),
+    attributes: Array.from(attributes, ([name, record]) => ({name, ...record})),
+    events: Array.from(events, ([name, record]) => ({name, ...record})),
+  };
 }
 
 function invalidFieldModifier(member: {

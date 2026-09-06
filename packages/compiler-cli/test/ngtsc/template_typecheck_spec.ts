@@ -20,6 +20,12 @@ import {
 import {factory as invalidBananaInBoxFactory} from '../../src/ngtsc/typecheck/extended/checks/invalid_banana_in_box';
 
 import {NgtscTestEnvironment} from './env';
+import {
+  createDefinitionExport,
+  createManifest,
+  createManifestElement,
+  createManifestModule,
+} from '../../src/ngtsc/custom_elements_manifest/testing';
 
 const testFiles = loadStandardTestFiles({fakeCommon: true});
 
@@ -4605,47 +4611,32 @@ runInEachFileSystem(() => {
     });
 
     describe('schema checking with custom elements manifests', () => {
-      const manifest = {
-        schemaVersion: '1.0.0',
-        modules: [
-          {
-            kind: 'javascript-module',
-            path: 'my-button.js',
-            declarations: [
-              {
-                kind: 'class',
-                name: 'MyButton',
-                customElement: true,
-                tagName: 'my-button',
-                members: [
-                  {kind: 'field', name: 'label', type: {text: 'string'}},
-                  {kind: 'field', name: 'disabled', type: {text: 'boolean'}},
-                  {kind: 'field', name: 'innerHTML', type: {text: 'string'}},
-                  {
-                    kind: 'field',
-                    name: 'readonly',
-                    attribute: 'readonly',
-                    type: {text: 'boolean'},
-                  },
-                  {kind: 'field', name: 'validity', type: {text: 'object'}, readonly: true},
-                ],
-                attributes: [
-                  {name: 'data-mode', type: {text: 'string'}},
-                  {name: 'readonly', fieldName: 'readonly'},
-                ],
-                events: [{name: 'itemselect', type: {text: 'unknown'}}],
-              },
-            ],
-            exports: [
-              {
-                kind: 'custom-element-definition',
-                name: 'my-button',
-                declaration: {name: 'MyButton'},
-              },
-            ],
-          },
-        ],
-      };
+      const manifest = createManifest([
+        createManifestModule('my-button.js', {
+          declarations: [
+            createManifestElement('MyButton', 'my-button', {
+              members: [
+                {kind: 'field', name: 'label', type: {text: 'string'}},
+                {kind: 'field', name: 'disabled', type: {text: 'boolean'}},
+                {kind: 'field', name: 'innerHTML', type: {text: 'string'}},
+                {
+                  kind: 'field',
+                  name: 'readonly',
+                  attribute: 'readonly',
+                  type: {text: 'boolean'},
+                },
+                {kind: 'field', name: 'validity', type: {text: 'object'}, readonly: true},
+              ],
+              attributes: [
+                {name: 'data-mode', type: {text: 'string'}},
+                {name: 'readonly', fieldName: 'readonly'},
+              ],
+              events: [{name: 'itemselect', type: {text: 'unknown'}}],
+            }),
+          ],
+          exports: [createDefinitionExport('my-button', 'MyButton')],
+        }),
+      ]);
 
       beforeEach(() => {
         env.tsconfig({strictTemplates: false, customElementsManifests: ['./custom-elements.json']});
@@ -5165,19 +5156,16 @@ runInEachFileSystem(() => {
       it('should summarize repeated warnings by default and expand them with customElementsManifestsDiagnostics', () => {
         env.write(
           'custom-elements.json',
-          JSON.stringify({
-            schemaVersion: '1.0.0',
-            modules: [
-              {
-                kind: 'javascript-module',
-                path: 'bases.js',
+          JSON.stringify(
+            createManifest([
+              createManifestModule('bases.js', {
                 declarations: [
-                  {kind: 'class', name: 'BaseButton', customElement: true, tagName: 'BaseButton'},
-                  {kind: 'class', name: 'BaseInput', customElement: true, tagName: 'BaseInput'},
+                  createManifestElement('BaseButton', 'BaseButton'),
+                  createManifestElement('BaseInput', 'BaseInput'),
                 ],
-              },
-            ],
-          }),
+              }),
+            ]),
+          ),
         );
         env.write('test.ts', `export const unused = true;`);
 
@@ -5206,24 +5194,17 @@ runInEachFileSystem(() => {
       it('should warn about and skip declarations with native tag names', () => {
         env.write(
           'custom-elements.json',
-          JSON.stringify({
-            schemaVersion: '1.0.0',
-            modules: [
-              {
-                kind: 'javascript-module',
-                path: 'fancy-marquee.js',
+          JSON.stringify(
+            createManifest([
+              createManifestModule('fancy-marquee.js', {
                 declarations: [
-                  {
-                    kind: 'class',
-                    name: 'FancyMarquee',
-                    customElement: true,
-                    tagName: 'marquee',
+                  createManifestElement('FancyMarquee', 'marquee', {
                     members: [{kind: 'field', name: 'glitter', type: {text: 'boolean'}}],
-                  },
+                  }),
                 ],
-              },
-            ],
-          }),
+              }),
+            ]),
+          ),
         );
         env.write(
           'test.ts',
@@ -5254,31 +5235,18 @@ runInEachFileSystem(() => {
       it('should warn about duplicate tags across manifests and use the first declaration', () => {
         env.write(
           'second-manifest.json',
-          JSON.stringify({
-            schemaVersion: '1.0.0',
-            modules: [
-              {
-                kind: 'javascript-module',
-                path: 'other-button.js',
+          JSON.stringify(
+            createManifest([
+              createManifestModule('other-button.js', {
                 declarations: [
-                  {
-                    kind: 'class',
-                    name: 'OtherButton',
-                    customElement: true,
-                    tagName: 'my-button',
+                  createManifestElement('OtherButton', 'my-button', {
                     members: [{kind: 'field', name: 'other', type: {text: 'string'}}],
-                  },
+                  }),
                 ],
-                exports: [
-                  {
-                    kind: 'custom-element-definition',
-                    name: 'my-button',
-                    declaration: {name: 'OtherButton'},
-                  },
-                ],
-              },
-            ],
-          }),
+                exports: [createDefinitionExport('my-button', 'OtherButton')],
+              }),
+            ]),
+          ),
         );
         env.tsconfig({
           strictTemplates: false,
@@ -5309,59 +5277,44 @@ runInEachFileSystem(() => {
       });
 
       describe('binding value type checking', () => {
-        const typedManifest = {
-          schemaVersion: '1.0.0',
-          modules: [
-            {
-              kind: 'javascript-module',
-              path: 'my-button.js',
-              declarations: [
-                {
-                  kind: 'class',
-                  name: 'MyButton',
-                  customElement: true,
-                  tagName: 'my-button',
-                  members: [
-                    {kind: 'field', name: 'count', type: {text: 'number'}},
-                    {kind: 'field', name: 'variant', type: {text: "'primary' | 'secondary'"}},
-                  ],
-                  attributes: [
-                    {name: 'count', fieldName: 'count', type: {text: 'number'}},
-                    {
-                      name: 'variant',
-                      fieldName: 'variant',
-                      type: {text: "'primary' | 'secondary'"},
+        const typedManifest = createManifest([
+          createManifestModule('my-button.js', {
+            declarations: [
+              createManifestElement('MyButton', 'my-button', {
+                members: [
+                  {kind: 'field', name: 'count', type: {text: 'number'}},
+                  {kind: 'field', name: 'variant', type: {text: "'primary' | 'secondary'"}},
+                ],
+                attributes: [
+                  {name: 'count', fieldName: 'count', type: {text: 'number'}},
+                  {
+                    name: 'variant',
+                    fieldName: 'variant',
+                    type: {text: "'primary' | 'secondary'"},
+                  },
+                ],
+                events: [
+                  {
+                    name: 'countchange',
+                    type: {
+                      text: 'CustomEvent<{value: string}>',
+                      references: [{name: 'CustomEvent', package: 'global:', start: 0, end: 11}],
                     },
-                  ],
-                  events: [
-                    {
-                      name: 'countchange',
-                      type: {
-                        text: 'CustomEvent<{value: string}>',
-                        references: [{name: 'CustomEvent', package: 'global:', start: 0, end: 11}],
-                      },
+                  },
+                  {
+                    name: 'click',
+                    type: {
+                      text: 'CustomEvent<{value: string}>',
+                      references: [{name: 'CustomEvent', package: 'global:', start: 0, end: 11}],
                     },
-                    {
-                      name: 'click',
-                      type: {
-                        text: 'CustomEvent<{value: string}>',
-                        references: [{name: 'CustomEvent', package: 'global:', start: 0, end: 11}],
-                      },
-                      description: 'Fired when the custom button activates.',
-                    },
-                  ],
-                },
-              ],
-              exports: [
-                {
-                  kind: 'custom-element-definition',
-                  name: 'my-button',
-                  declaration: {name: 'MyButton'},
-                },
-              ],
-            },
-          ],
-        };
+                    description: 'Fired when the custom button activates.',
+                  },
+                ],
+              }),
+            ],
+            exports: [createDefinitionExport('my-button', 'MyButton')],
+          }),
+        ]);
 
         function writeComponent(template: string): void {
           env.write(
@@ -5561,78 +5514,66 @@ runInEachFileSystem(() => {
           expect(diags[0].messageText).toContain(`member 'items' on 'my-button'`);
         });
 
-        it('should check values against types referenced from a package', () => {
-          env.write(
-            'node_modules/@my/elements/package.json',
-            JSON.stringify({
-              name: '@my/elements',
-              types: './index.d.ts',
-              customElements: './custom-elements.json',
-            }),
-          );
-          env.write(
-            'node_modules/@my/elements/index.d.ts',
-            `export type ButtonVariant = 'a' | 'b';`,
-          );
-          env.write(
-            'node_modules/@my/elements/lib-button.d.ts',
-            `export declare class LibButton extends HTMLElement { variant: 'a' | 'b'; }`,
-          );
-          env.write(
-            'node_modules/@my/elements/custom-elements.json',
-            JSON.stringify({
-              schemaVersion: '1.0.0',
-              modules: [
-                {
-                  kind: 'javascript-module',
-                  path: 'lib-button.js',
-                  declarations: [
-                    {
-                      kind: 'class',
-                      name: 'LibButton',
-                      customElement: true,
-                      tagName: 'lib-button',
-                      members: [
-                        {
-                          kind: 'field',
-                          name: 'variant',
-                          type: {
-                            text: 'ButtonVariant',
-                            references: [
-                              {
-                                name: 'ButtonVariant',
-                                package: '@my/elements',
-                                start: 0,
-                                end: 13,
-                              },
-                            ],
+        for (const indexed of [true, false]) {
+          it(`should check values against ${indexed ? 'indexed' : 'index-less'} references from a package`, () => {
+            env.write(
+              'node_modules/@my/elements/package.json',
+              JSON.stringify({
+                name: '@my/elements',
+                types: './index.d.ts',
+                customElements: './custom-elements.json',
+              }),
+            );
+            env.write(
+              'node_modules/@my/elements/index.d.ts',
+              `export type ButtonVariant = 'a' | 'b';`,
+            );
+            env.write(
+              'node_modules/@my/elements/lib-button.d.ts',
+              `export declare class LibButton extends HTMLElement { variant: 'a' | 'b'; }`,
+            );
+            env.write(
+              'node_modules/@my/elements/custom-elements.json',
+              JSON.stringify(
+                createManifest([
+                  createManifestModule('lib-button.js', {
+                    declarations: [
+                      createManifestElement('LibButton', 'lib-button', {
+                        members: [
+                          {
+                            kind: 'field',
+                            name: 'variant',
+                            type: {
+                              text: 'ButtonVariant',
+                              references: [
+                                {
+                                  name: 'ButtonVariant',
+                                  package: '@my/elements',
+                                  ...(indexed ? {start: 0, end: 13} : {}),
+                                },
+                              ],
+                            },
                           },
-                        },
-                      ],
-                    },
-                  ],
-                  exports: [
-                    {
-                      kind: 'custom-element-definition',
-                      name: 'lib-button',
-                      declaration: {name: 'LibButton'},
-                    },
-                  ],
-                },
-              ],
-            }),
-          );
-          env.tsconfig({strictTemplates: true, customElementsManifests: ['@my/elements']});
+                        ],
+                      }),
+                    ],
+                    exports: [createDefinitionExport('lib-button', 'LibButton')],
+                  }),
+                ]),
+              ),
+            );
+            env.tsconfig({strictTemplates: true, customElementsManifests: ['@my/elements']});
 
-          writeComponent(`<lib-button [variant]="\\'c\\'"></lib-button>`);
-          let diags = env.driveDiagnostics();
-          expect(diags.length).toBe(1);
-          expect(diags[0].messageText).toContain(`not assignable to type`);
+            writeComponent(`<lib-button [variant]="\\'c\\'"></lib-button>`);
+            let diags = env.driveDiagnostics();
+            expect(diags.length).toBe(1);
+            expect(diags[0].messageText).toContain(`not assignable to type`);
 
-          writeComponent(`<lib-button [variant]="\\'a\\'"></lib-button>`);
-          diags = env.driveDiagnostics();
-          expect(diags).toEqual([]);
-        });
+            writeComponent(`<lib-button [variant]="\\'a\\'"></lib-button>`);
+            diags = env.driveDiagnostics();
+            expect(diags).toEqual([]);
+          });
+        }
 
         it('should type local references from an importable package declaration', () => {
           env.write(
@@ -5653,31 +5594,18 @@ runInEachFileSystem(() => {
           );
           env.write(
             'node_modules/@my/elements/custom-elements.json',
-            JSON.stringify({
-              schemaVersion: '1.0.0',
-              modules: [
-                {
-                  kind: 'javascript-module',
-                  path: 'lib-button.js',
+            JSON.stringify(
+              createManifest([
+                createManifestModule('lib-button.js', {
                   declarations: [
-                    {
-                      kind: 'class',
-                      name: 'LibButton',
-                      customElement: true,
-                      tagName: 'lib-button',
+                    createManifestElement('LibButton', 'lib-button', {
                       members: [{kind: 'field', name: 'count', type: {text: 'number'}}],
-                    },
+                    }),
                   ],
-                  exports: [
-                    {
-                      kind: 'custom-element-definition',
-                      name: 'lib-button',
-                      declaration: {name: 'LibButton'},
-                    },
-                  ],
-                },
-              ],
-            }),
+                  exports: [createDefinitionExport('lib-button', 'LibButton')],
+                }),
+              ]),
+            ),
           );
           env.tsconfig({strictTemplates: true, customElementsManifests: ['@my/elements']});
 
@@ -5709,31 +5637,18 @@ runInEachFileSystem(() => {
             );
             env.write(
               'node_modules/@my/elements/custom-elements.json',
-              JSON.stringify({
-                schemaVersion: '1.0.0',
-                modules: [
-                  {
-                    kind: 'javascript-module',
-                    path: 'element.js',
+              JSON.stringify(
+                createManifest([
+                  createManifestModule('element.js', {
                     declarations: [
-                      {
-                        kind: 'class',
-                        name: 'GenericElement',
-                        customElement: true,
-                        tagName: 'generic-element',
+                      createManifestElement('GenericElement', 'generic-element', {
                         members: [{kind: 'field', name: 'count', type: {text: 'number'}}],
-                      },
+                      }),
                     ],
-                    exports: [
-                      {
-                        kind: 'custom-element-definition',
-                        name: 'generic-element',
-                        declaration: {name: 'GenericElement'},
-                      },
-                    ],
-                  },
-                ],
-              }),
+                    exports: [createDefinitionExport('generic-element', 'GenericElement')],
+                  }),
+                ]),
+              ),
             );
             env.tsconfig({strictTemplates: true, customElementsManifests: ['@my/elements']});
             writeComponent(
@@ -5790,26 +5705,12 @@ runInEachFileSystem(() => {
           );
           env.write(
             'node_modules/@my/elements/custom-elements.json',
-            JSON.stringify({
-              schemaVersion: '1.0.0',
-              modules: [
-                {
-                  kind: 'javascript-module',
-                  path: 'accordion/accordion-header.js',
-                  declarations: [
-                    {
-                      kind: 'class',
-                      name: 'AccordionHeader',
-                      customElement: true,
-                      tagName: 'accordion-header',
-                    },
-                  ],
+            JSON.stringify(
+              createManifest([
+                createManifestModule('accordion/accordion-header.js', {
+                  declarations: [createManifestElement('AccordionHeader', 'accordion-header')],
                   exports: [
-                    {
-                      kind: 'custom-element-definition',
-                      name: 'accordion-header',
-                      declaration: {name: 'AccordionHeader'},
-                    },
+                    createDefinitionExport('accordion-header', 'AccordionHeader'),
                     {
                       kind: 'js',
                       name: 'AccordionHeader',
@@ -5819,10 +5720,8 @@ runInEachFileSystem(() => {
                       },
                     },
                   ],
-                },
-                {
-                  kind: 'javascript-module',
-                  path: 'accordion/accordion.js',
+                }),
+                createManifestModule('accordion/accordion.js', {
                   exports: [
                     {
                       kind: 'js',
@@ -5833,9 +5732,9 @@ runInEachFileSystem(() => {
                       },
                     },
                   ],
-                },
-              ],
-            }),
+                }),
+              ]),
+            ),
           );
           env.tsconfig({strictTemplates: true, customElementsManifests: ['@my/elements']});
 
@@ -5868,31 +5767,18 @@ runInEachFileSystem(() => {
           );
           env.write(
             'node_modules/@my/elements/custom-elements.json',
-            JSON.stringify({
-              schemaVersion: '1.0.0',
-              modules: [
-                {
-                  kind: 'javascript-module',
-                  path: 'lib-button.js',
+            JSON.stringify(
+              createManifest([
+                createManifestModule('lib-button.js', {
                   declarations: [
-                    {
-                      kind: 'class',
-                      name: 'LibButton',
-                      customElement: true,
-                      tagName: 'lib-button',
+                    createManifestElement('LibButton', 'lib-button', {
                       members: [{kind: 'field', name: 'count', type: {text: 'number'}}],
-                    },
+                    }),
                   ],
-                  exports: [
-                    {
-                      kind: 'custom-element-definition',
-                      name: 'lib-button',
-                      declaration: {name: 'LibButton'},
-                    },
-                  ],
-                },
-              ],
-            }),
+                  exports: [createDefinitionExport('lib-button', 'LibButton')],
+                }),
+              ]),
+            ),
           );
           env.tsconfig({strictTemplates: true, customElementsManifests: ['@my/elements']});
 
@@ -5912,32 +5798,21 @@ runInEachFileSystem(() => {
           env.write('node_modules/@my/elements/index.d.ts', `export {};`);
           env.write(
             'node_modules/@my/elements/custom-elements.json',
-            JSON.stringify({
-              schemaVersion: '1.0.0',
-              modules: [
+            JSON.stringify(
+              createManifest([
                 {
                   // An unpublished source path: the declaration's class cannot be imported.
                   kind: 'javascript-module',
                   path: 'src/lib-button.ts',
                   declarations: [
-                    {
-                      kind: 'class',
-                      name: 'LibButton',
-                      customElement: true,
-                      tagName: 'lib-button',
+                    createManifestElement('LibButton', 'lib-button', {
                       members: [{kind: 'field', name: 'count', type: {text: 'number'}}],
-                    },
+                    }),
                   ],
-                  exports: [
-                    {
-                      kind: 'custom-element-definition',
-                      name: 'lib-button',
-                      declaration: {name: 'LibButton'},
-                    },
-                  ],
+                  exports: [createDefinitionExport('lib-button', 'LibButton')],
                 },
-              ],
-            }),
+              ]),
+            ),
           );
           env.tsconfig({strictTemplates: true, customElementsManifests: ['@my/elements']});
 
@@ -5968,30 +5843,14 @@ runInEachFileSystem(() => {
           env.write('node_modules/@my/elements/lib-button.d.ts', `export declare class Other {}`);
           env.write(
             'node_modules/@my/elements/custom-elements.json',
-            JSON.stringify({
-              schemaVersion: '1.0.0',
-              modules: [
-                {
-                  kind: 'javascript-module',
-                  path: 'lib-button.js',
-                  declarations: [
-                    {
-                      kind: 'class',
-                      name: 'LibButton',
-                      customElement: true,
-                      tagName: 'lib-button',
-                    },
-                  ],
-                  exports: [
-                    {
-                      kind: 'custom-element-definition',
-                      name: 'lib-button',
-                      declaration: {name: 'LibButton'},
-                    },
-                  ],
-                },
-              ],
-            }),
+            JSON.stringify(
+              createManifest([
+                createManifestModule('lib-button.js', {
+                  declarations: [createManifestElement('LibButton', 'lib-button')],
+                  exports: [createDefinitionExport('lib-button', 'LibButton')],
+                }),
+              ]),
+            ),
           );
           env.tsconfig({strictTemplates: true, customElementsManifests: ['@my/elements']});
 
@@ -6006,72 +5865,62 @@ runInEachFileSystem(() => {
           expect(diags[0].messageText).toContain(`'@my/elements/lib-button.js'`);
         });
 
-        it('should warn and fall back to existence checking for references to packages without types', () => {
-          env.write(
-            'custom-elements.json',
-            JSON.stringify({
-              schemaVersion: '1.0.0',
-              modules: [
-                {
-                  kind: 'javascript-module',
-                  path: 'my-button.js',
-                  declarations: [
-                    {
-                      kind: 'class',
-                      name: 'MyButton',
-                      customElement: true,
-                      tagName: 'my-button',
-                      members: [
-                        {
-                          kind: 'field',
-                          name: 'variant',
-                          type: {
-                            text: 'Variant',
-                            references: [
-                              {name: 'Variant', package: '@does/not-exist', start: 0, end: 7},
-                            ],
+        for (const [kind, name, type, template] of [
+          ['members', 'variant', 'Variant', `<my-button [variant]="\\'a\\'"></my-button>`],
+          ['events', 'commit', 'CommitEvent', `<my-button (commit)="$event"></my-button>`],
+        ] as const) {
+          it(`should warn and retain ${kind} bindings when a referenced package has no types`, () => {
+            env.write(
+              'custom-elements.json',
+              JSON.stringify(
+                createManifest([
+                  createManifestModule('my-button.js', {
+                    declarations: [
+                      createManifestElement('MyButton', 'my-button', {
+                        [kind]: [
+                          {
+                            ...(kind === 'members' ? {kind: 'field'} : {}),
+                            name,
+                            type: {
+                              text: type,
+                              references: [
+                                {
+                                  name: type,
+                                  package: '@does/not-exist',
+                                  start: 0,
+                                  end: type.length,
+                                },
+                              ],
+                            },
                           },
-                        },
-                      ],
-                    },
-                  ],
-                  exports: [
-                    {
-                      kind: 'custom-element-definition',
-                      name: 'my-button',
-                      declaration: {name: 'MyButton'},
-                    },
-                  ],
-                },
-              ],
-            }),
-          );
-          writeComponent(`<my-button [variant]="\\'a\\'"></my-button>`);
-          // Report the unresolved reference as a configuration warning without template errors.
-          const diags = env.driveDiagnostics();
-          expect(diags.length).toBe(1);
-          expect(diags[0].code).toBe(
-            ngErrorCode(ErrorCode.CONFIG_CUSTOM_ELEMENTS_MANIFEST_UNRESOLVABLE_TYPE_REFERENCE),
-          );
-          expect(diags[0].category).toBe(ts.DiagnosticCategory.Warning);
-          expect(diags[0].messageText).toContain(`'@does/not-exist'`);
-        });
+                        ],
+                      }),
+                    ],
+                    exports: [createDefinitionExport('my-button', 'MyButton')],
+                  }),
+                ]),
+              ),
+            );
+            writeComponent(template);
+            // Report the unresolved reference as a configuration warning without template errors.
+            const diags = env.driveDiagnostics();
+            expect(diags.length).toBe(1);
+            expect(diags[0].code).toBe(
+              ngErrorCode(ErrorCode.CONFIG_CUSTOM_ELEMENTS_MANIFEST_UNRESOLVABLE_TYPE_REFERENCE),
+            );
+            expect(diags[0].category).toBe(ts.DiagnosticCategory.Warning);
+            expect(diags[0].messageText).toContain(`'@does/not-exist'`);
+          });
+        }
 
         it('should warn and fall back instead of emitting an unknown global into the TCB', () => {
           env.write(
             'custom-elements.json',
-            JSON.stringify({
-              schemaVersion: '1.0.0',
-              modules: [
-                {
-                  kind: 'javascript-module',
-                  path: 'my-button.js',
+            JSON.stringify(
+              createManifest([
+                createManifestModule('my-button.js', {
                   declarations: [
-                    {
-                      kind: 'class',
-                      name: 'MyButton',
-                      customElement: true,
-                      tagName: 'my-button',
+                    createManifestElement('MyButton', 'my-button', {
                       members: [
                         {
                           kind: 'field',
@@ -6082,18 +5931,12 @@ runInEachFileSystem(() => {
                           },
                         },
                       ],
-                    },
+                    }),
                   ],
-                  exports: [
-                    {
-                      kind: 'custom-element-definition',
-                      name: 'my-button',
-                      declaration: {name: 'MyButton'},
-                    },
-                  ],
-                },
-              ],
-            }),
+                  exports: [createDefinitionExport('my-button', 'MyButton')],
+                }),
+              ]),
+            ),
           );
           writeComponent(`<my-button [missing]="1"></my-button>`);
 
@@ -6117,74 +5960,6 @@ runInEachFileSystem(() => {
           expect(diags).toEqual([]);
         });
 
-        it('should check values against index-less references from a package', () => {
-          env.write(
-            'node_modules/@my/elements/package.json',
-            JSON.stringify({
-              name: '@my/elements',
-              types: './index.d.ts',
-              customElements: './custom-elements.json',
-            }),
-          );
-          env.write(
-            'node_modules/@my/elements/index.d.ts',
-            `export type ButtonVariant = 'a' | 'b';`,
-          );
-          env.write(
-            'node_modules/@my/elements/lib-button.d.ts',
-            `export declare class LibButton extends HTMLElement { variant: 'a' | 'b'; }`,
-          );
-          env.write(
-            'node_modules/@my/elements/custom-elements.json',
-            JSON.stringify({
-              schemaVersion: '1.0.0',
-              modules: [
-                {
-                  kind: 'javascript-module',
-                  path: 'lib-button.js',
-                  declarations: [
-                    {
-                      kind: 'class',
-                      name: 'LibButton',
-                      customElement: true,
-                      tagName: 'lib-button',
-                      members: [
-                        {
-                          kind: 'field',
-                          name: 'variant',
-                          // Per the CEM spec, a reference without start/end covers the whole
-                          // type text.
-                          type: {
-                            text: 'ButtonVariant',
-                            references: [{name: 'ButtonVariant', package: '@my/elements'}],
-                          },
-                        },
-                      ],
-                    },
-                  ],
-                  exports: [
-                    {
-                      kind: 'custom-element-definition',
-                      name: 'lib-button',
-                      declaration: {name: 'LibButton'},
-                    },
-                  ],
-                },
-              ],
-            }),
-          );
-          env.tsconfig({strictTemplates: true, customElementsManifests: ['@my/elements']});
-
-          writeComponent(`<lib-button [variant]="\\'c\\'"></lib-button>`);
-          let diags = env.driveDiagnostics();
-          expect(diags.length).toBe(1);
-          expect(diags[0].messageText).toContain(`not assignable to type`);
-
-          writeComponent(`<lib-button [variant]="\\'a\\'"></lib-button>`);
-          diags = env.driveDiagnostics();
-          expect(diags).toEqual([]);
-        });
-
         it('should recognize definition-only custom-element tags without suppressing member checks', () => {
           env.write(
             'node_modules/@ce/defonly/package.json',
@@ -6192,12 +5967,9 @@ runInEachFileSystem(() => {
           );
           env.write(
             'node_modules/@ce/defonly/custom-elements.json',
-            JSON.stringify({
-              schemaVersion: '1.0.0',
-              modules: [
-                {
-                  kind: 'javascript-module',
-                  path: 'define.js',
+            JSON.stringify(
+              createManifest([
+                createManifestModule('define.js', {
                   exports: [
                     {
                       kind: 'custom-element-definition',
@@ -6205,9 +5977,9 @@ runInEachFileSystem(() => {
                       declaration: {name: 'GhostElement', module: 'ghost.js'},
                     },
                   ],
-                },
-              ],
-            }),
+                }),
+              ]),
+            ),
           );
           env.tsconfig({strictTemplates: true, customElementsManifests: ['@ce/defonly']});
 
@@ -6339,56 +6111,6 @@ runInEachFileSystem(() => {
           diags = env.driveDiagnostics();
           expect(diags.length).toBe(2);
           expect(diags[1].messageText).toContain(`'doesNotExist' does not exist`);
-        });
-
-        it('should warn and fall back to event inference for references to packages without types', () => {
-          env.write(
-            'custom-elements.json',
-            JSON.stringify({
-              schemaVersion: '1.0.0',
-              modules: [
-                {
-                  kind: 'javascript-module',
-                  path: 'my-button.js',
-                  declarations: [
-                    {
-                      kind: 'class',
-                      name: 'MyButton',
-                      customElement: true,
-                      tagName: 'my-button',
-                      events: [
-                        {
-                          name: 'commit',
-                          type: {
-                            text: 'CommitEvent',
-                            references: [
-                              {name: 'CommitEvent', package: '@does/not-exist', start: 0, end: 11},
-                            ],
-                          },
-                        },
-                      ],
-                    },
-                  ],
-                  exports: [
-                    {
-                      kind: 'custom-element-definition',
-                      name: 'my-button',
-                      declaration: {name: 'MyButton'},
-                    },
-                  ],
-                },
-              ],
-            }),
-          );
-          writeComponent(`<my-button (commit)="$event"></my-button>`);
-          // Report the unresolved reference as a configuration warning and infer $event from the DOM.
-          const diags = env.driveDiagnostics();
-          expect(diags.length).toBe(1);
-          expect(diags[0].code).toBe(
-            ngErrorCode(ErrorCode.CONFIG_CUSTOM_ELEMENTS_MANIFEST_UNRESOLVABLE_TYPE_REFERENCE),
-          );
-          expect(diags[0].category).toBe(ts.DiagnosticCategory.Warning);
-          expect(diags[0].messageText).toContain(`'@does/not-exist'`);
         });
 
         it('should not check event types outside of strict mode', () => {

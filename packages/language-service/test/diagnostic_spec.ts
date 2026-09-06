@@ -12,6 +12,12 @@ import {absoluteFrom, getFileSystem} from '@angular/compiler-cli/src/ngtsc/file_
 import ts from 'typescript';
 
 import {createModuleAndProjectWithDeclarations, LanguageServiceTestEnv} from '../testing';
+import {
+  createDefinitionExport,
+  createManifest,
+  createManifestElement,
+  createManifestModule,
+} from '../../compiler-cli/src/ngtsc/custom_elements_manifest/testing';
 
 describe('getSemanticDiagnostics', () => {
   let env: LanguageServiceTestEnv;
@@ -105,31 +111,16 @@ describe('getSemanticDiagnostics', () => {
   });
 
   it('should report invalid interpolated custom-element manifest properties', () => {
-    const manifest = {
-      schemaVersion: '1.0.0',
-      modules: [
-        {
-          kind: 'javascript-module',
-          path: 'my-meter.js',
-          declarations: [
-            {
-              kind: 'class',
-              name: 'MyMeter',
-              customElement: true,
-              tagName: 'my-meter',
-              members: [{kind: 'field', name: 'value', type: {text: 'number'}}],
-            },
-          ],
-          exports: [
-            {
-              kind: 'custom-element-definition',
-              name: 'my-meter',
-              declaration: {name: 'MyMeter'},
-            },
-          ],
-        },
-      ],
-    };
+    const manifest = createManifest([
+      createManifestModule('my-meter.js', {
+        declarations: [
+          createManifestElement('MyMeter', 'my-meter', {
+            members: [{kind: 'field', name: 'value', type: {text: 'number'}}],
+          }),
+        ],
+        exports: [createDefinitionExport('my-meter', 'MyMeter')],
+      }),
+    ]);
     const project = env.addProject(
       'test-cem-interpolation',
       {
@@ -151,31 +142,17 @@ describe('getSemanticDiagnostics', () => {
   });
 
   it('should update custom-element manifest diagnostics after an editor resource change', () => {
-    const manifest = (type: string) => ({
-      schemaVersion: '1.0.0',
-      modules: [
-        {
-          kind: 'javascript-module',
-          path: 'my-meter.js',
+    const manifest = (type: string) =>
+      createManifest([
+        createManifestModule('my-meter.js', {
           declarations: [
-            {
-              kind: 'class',
-              name: 'MyMeter',
-              customElement: true,
-              tagName: 'my-meter',
+            createManifestElement('MyMeter', 'my-meter', {
               members: [{kind: 'field', name: 'value', type: {text: type}}],
-            },
+            }),
           ],
-          exports: [
-            {
-              kind: 'custom-element-definition',
-              name: 'my-meter',
-              declaration: {name: 'MyMeter'},
-            },
-          ],
-        },
-      ],
-    });
+          exports: [createDefinitionExport('my-meter', 'MyMeter')],
+        }),
+      ]);
     const project = env.addProject(
       'test-cem-resource-change',
       {
@@ -202,31 +179,16 @@ describe('getSemanticDiagnostics', () => {
   });
 
   it('should load a configured relative manifest created after it was initially missing', () => {
-    const manifest = {
-      schemaVersion: '1.0.0',
-      modules: [
-        {
-          kind: 'javascript-module',
-          path: 'late-meter.js',
-          declarations: [
-            {
-              kind: 'class',
-              name: 'LateMeter',
-              customElement: true,
-              tagName: 'late-meter',
-              members: [{kind: 'field', name: 'value', type: {text: 'number'}}],
-            },
-          ],
-          exports: [
-            {
-              kind: 'custom-element-definition',
-              name: 'late-meter',
-              declaration: {name: 'LateMeter'},
-            },
-          ],
-        },
-      ],
-    };
+    const manifest = createManifest([
+      createManifestModule('late-meter.js', {
+        declarations: [
+          createManifestElement('LateMeter', 'late-meter', {
+            members: [{kind: 'field', name: 'value', type: {text: 'number'}}],
+          }),
+        ],
+        exports: [createDefinitionExport('late-meter', 'LateMeter')],
+      }),
+    ]);
     const project = env.addProject(
       'test-cem-created-after-missing',
       {
@@ -302,22 +264,13 @@ describe('getSemanticDiagnostics', () => {
       const manifestPath = absoluteFrom(project.getAbsFileName(manifestFile));
       getFileSystem().writeFile(
         manifestPath,
-        JSON.stringify({
-          schemaVersion: '1.0.0',
-          modules: [
-            {
-              kind: 'javascript-module',
-              path: 'element.js',
-              exports: [
-                {
-                  kind: 'custom-element-definition',
-                  name: 'late-element',
-                  declaration: {name: 'Element'},
-                },
-              ],
-            },
-          ],
-        }),
+        JSON.stringify(
+          createManifest([
+            createManifestModule('element.js', {
+              exports: [createDefinitionExport('late-element', 'Element')],
+            }),
+          ]),
+        ),
       );
       env.notifyFileChange(manifestPath, ts.FileWatcherEventKind.Created);
       expect(
@@ -334,18 +287,13 @@ describe('getSemanticDiagnostics', () => {
 
   it('should refresh definition-only manifests when a package export changes', () => {
     const manifest = (tag: string) =>
-      JSON.stringify({
-        schemaVersion: '1.0.0',
-        modules: [
-          {
-            kind: 'javascript-module',
-            path: 'element.js',
-            exports: [
-              {kind: 'custom-element-definition', name: tag, declaration: {name: 'Element'}},
-            ],
-          },
-        ],
-      });
+      JSON.stringify(
+        createManifest([
+          createManifestModule('element.js', {
+            exports: [createDefinitionExport(tag, 'Element')],
+          }),
+        ]),
+      );
     const packageJson = (file: string) =>
       JSON.stringify({
         name: '@test/elements',
@@ -385,15 +333,9 @@ describe('getSemanticDiagnostics', () => {
     const manifest = (type: string) => ({
       schemaVersion: '1.0.0',
       modules: [
-        {
-          kind: 'javascript-module',
-          path: 'large-meter.js',
+        createManifestModule('large-meter.js', {
           declarations: [
-            {
-              kind: 'class',
-              name: 'LargeMeter',
-              customElement: true,
-              tagName: 'large-meter',
+            createManifestElement('LargeMeter', 'large-meter', {
               members: [
                 {
                   kind: 'field',
@@ -402,16 +344,10 @@ describe('getSemanticDiagnostics', () => {
                   type: {text: type},
                 },
               ],
-            },
+            }),
           ],
-          exports: [
-            {
-              kind: 'custom-element-definition',
-              name: 'large-meter',
-              declaration: {name: 'LargeMeter'},
-            },
-          ],
-        },
+          exports: [createDefinitionExport('large-meter', 'LargeMeter')],
+        }),
       ],
       // TypeScript uses an empty ScriptInfo snapshot for non-TypeScript files over 4 MB.
       ignoredPadding: 'x'.repeat(4 * 1024 * 1024),
@@ -469,39 +405,30 @@ describe('getSemanticDiagnostics', () => {
   });
 
   it('should resolve manifest type references through declarations outside the app program', () => {
-    const manifest = {
-      schemaVersion: '1.0.0',
-      modules: [
-        {
-          kind: 'javascript-module',
-          path: 'button.js',
-          declarations: [
-            {
-              kind: 'class',
-              name: 'Button',
-              customElement: true,
-              tagName: 'button-box',
-              members: [
-                {
-                  kind: 'field',
-                  name: 'variant',
-                  attribute: 'variant',
-                  type: {
-                    text: 'ButtonVariant',
-                    references: [{name: 'ButtonVariant', module: 'button.js', start: 0, end: 13}],
-                  },
+    const manifest = createManifest([
+      createManifestModule('button.js', {
+        declarations: [
+          createManifestElement('Button', 'button-box', {
+            members: [
+              {
+                kind: 'field',
+                name: 'variant',
+                attribute: 'variant',
+                type: {
+                  text: 'ButtonVariant',
+                  references: [{name: 'ButtonVariant', module: 'button.js', start: 0, end: 13}],
                 },
-              ],
-              attributes: [{name: 'variant', fieldName: 'variant'}],
-            },
-          ],
-          exports: [
-            {kind: 'js', name: 'Button', declaration: {name: 'Button'}},
-            {kind: 'custom-element-definition', name: 'button-box', declaration: {name: 'Button'}},
-          ],
-        },
-      ],
-    };
+              },
+            ],
+            attributes: [{name: 'variant', fieldName: 'variant'}],
+          }),
+        ],
+        exports: [
+          {kind: 'js', name: 'Button', declaration: {name: 'Button'}},
+          createDefinitionExport('button-box', 'Button'),
+        ],
+      }),
+    ]);
     const project = env.addProject(
       'test-cem-transitive-types',
       {

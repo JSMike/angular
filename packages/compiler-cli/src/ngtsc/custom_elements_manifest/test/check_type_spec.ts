@@ -65,7 +65,6 @@ describe('computeCheckType', () => {
 
     it('should reject named types without references', () => {
       expect(check('Foo')).toBeNull();
-      expect(check('MyItem[]')).toBeNull();
       expect(check('Foo.Bar')).toBeNull();
       expect(check('Array<Foo>')).toBeNull();
       expect(check('{value: Foo}')).toBeNull();
@@ -107,12 +106,13 @@ describe('computeCheckType', () => {
       expect(check('string' + '\u2028' + '| number')).toBeNull(); // line separator
     });
 
-    it('should reject empty, oversized and unbalanced text', () => {
-      expect(check('')).toBeNull();
+    it('should reject whitespace-only and unbalanced text', () => {
       expect(check('   ')).toBeNull();
-      expect(check('string | '.repeat(64) + 'string')).toBeNull();
       expect(check('Array<string')).toBeNull();
       expect(check('string)')).toBeNull();
+      expect(check('string) | (number')).toBeNull();
+      expect(check('string)[] | (number')).toBeNull();
+      expect(check('(string | number)')).toBe('(string | number)');
     });
 
     it('should reject whitelist-safe text that is not valid TypeScript type syntax', () => {

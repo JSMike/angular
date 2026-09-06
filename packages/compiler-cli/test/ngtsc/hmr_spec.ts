@@ -13,6 +13,12 @@ import {loadStandardTestFiles} from '../../src/ngtsc/testing';
 import {CompilerOptions} from '../../src/transformers/api';
 import {createCompilerHost} from '../../src/transformers/compiler_host';
 import {NgtscTestEnvironment} from './env';
+import {
+  createDefinitionExport,
+  createManifest,
+  createManifestElement,
+  createManifestModule,
+} from '../../src/ngtsc/custom_elements_manifest/testing';
 
 runInEachFileSystem(() => {
   describe('HMR code generation', () => {
@@ -138,31 +144,18 @@ runInEachFileSystem(() => {
       enableHmr({customElementsManifests: ['./custom-elements.json']});
       env.write(
         'custom-elements.json',
-        JSON.stringify({
-          schemaVersion: '1.0.0',
-          modules: [
-            {
-              kind: 'javascript-module',
-              path: 'my-button.js',
+        JSON.stringify(
+          createManifest([
+            createManifestModule('my-button.js', {
               declarations: [
-                {
-                  kind: 'class',
-                  name: 'MyButton',
-                  customElement: true,
-                  tagName: 'my-button',
+                createManifestElement('MyButton', 'my-button', {
                   members: [{kind: 'field', name: 'readonly', type: {text: 'boolean'}}],
-                },
+                }),
               ],
-              exports: [
-                {
-                  kind: 'custom-element-definition',
-                  name: 'my-button',
-                  declaration: {name: 'MyButton'},
-                },
-              ],
-            },
-          ],
-        }),
+              exports: [createDefinitionExport('my-button', 'MyButton')],
+            }),
+          ]),
+        ),
       );
       env.write(
         'test.ts',

@@ -8,15 +8,12 @@
 
 import {extractDeclarationSchema, instanceCheckType, readDocs} from './manifest_members';
 import {
-  AttributeRecord,
   CemDeclaration,
-  EventRecord,
+  isObject,
   ManifestWarning,
   ParseContext,
   ParsedCustomElementSchema,
-  PropertyRecord,
 } from './schema';
-import {isObject} from './type_text';
 
 interface TagRegistrationRecord {
   deprecated?: true | string;
@@ -29,6 +26,17 @@ interface TagRegistrationRecord {
 interface JavaScriptExport {
   name: string;
   module: string;
+}
+
+interface ManifestRecords {
+  declarations: Map<string, CemDeclaration[]>;
+  elements: CemDeclaration[];
+  exports: Map<string, JavaScriptExport[]>;
+  definitions: Array<{
+    tagName: string;
+    registration: TagRegistrationRecord;
+    externalPackage: string | null;
+  }>;
 }
 
 /**
@@ -152,96 +160,8 @@ export function parseCustomElementsManifest(
         `metadata whose meaning changed in another version may be ignored.`,
     });
   }
-  // Validate modules once so later passes can use their paths without checking again.
-  const modules: Array<{path: string; [key: string]: unknown}> = [];
-  for (const [index, module] of manifest['modules'].entries()) {
-    if (
-      !isObject(module) ||
-      module['kind'] !== 'javascript-module' ||
-      typeof module['path'] !== 'string'
-    ) {
-      warnings.push({
-        kind: 'invalidStructure',
-        subject: `module[${index}]`,
-        message:
-          `${manifestLabel} contains an invalid module at index ${index}: Angular requires ` +
-          `kind "javascript-module" and a string path. The module is ignored; other valid ` +
-          `modules remain available.`,
-      });
-      continue;
-    }
-    modules.push(module as {path: string; [key: string]: unknown});
-  }
-
-  // First pass: collect all custom element class declarations across the manifest's modules,
-  // keyed by declaration name so that `custom-element-definition` exports can reference them.
-  const declarationsByModuleAndName = new Map<string, CemDeclaration[]>();
-  const customElementDeclarations: CemDeclaration[] = [];
-  for (const module of modules) {
-    if (!Array.isArray(module['declarations'])) {
-      continue;
-    }
-    for (const node of module['declarations']) {
-      if (!isObject(node) || typeof node['name'] !== 'string') {
-        continue;
-      }
-      const declaration: CemDeclaration = {name: node['name'], modulePath: module.path, node};
-      if (node['customElement'] === true) {
-        customElementDeclarations.push(declaration);
-      }
-      const key = declarationKey(module.path, declaration.name);
-      const inModule = declarationsByModuleAndName.get(key);
-      if (inModule !== undefined) {
-        inModule.push(declaration);
-      } else {
-        declarationsByModuleAndName.set(key, [declaration]);
-      }
-    }
-  }
-
-  // Index JavaScript exports by their declaration references, including missing declarations.
-  // Element instance types use this map to find public exports. `type.references` already name
-  // public exports and do not use this mapping.
-  const exportsByDeclarationIdentity = new Map<string, JavaScriptExport[]>();
-  for (const module of modules) {
-    if (!Array.isArray(module['exports'])) {
-      continue;
-    }
-    for (const exportEntry of module['exports']) {
-      if (
-        !isObject(exportEntry) ||
-        exportEntry['kind'] !== 'js' ||
-        typeof exportEntry['name'] !== 'string' ||
-        !isObject(exportEntry['declaration']) ||
-        typeof exportEntry['declaration']['name'] !== 'string' ||
-        typeof exportEntry['declaration']['package'] === 'string'
-      ) {
-        continue;
-      }
-      const declarationModule = exportEntry['declaration']['module'];
-      const referencedModule =
-        typeof declarationModule === 'string' ? declarationModule : module.path;
-      const key = declarationKey(referencedModule, exportEntry['declaration']['name']);
-      const candidate = {name: exportEntry['name'], module: module.path};
-      const candidates = exportsByDeclarationIdentity.get(key);
-      if (candidates === undefined) {
-        exportsByDeclarationIdentity.set(key, [candidate]);
-      } else if (
-        !candidates.some(
-          (existing) => existing.name === candidate.name && existing.module === candidate.module,
-        )
-      ) {
-        candidates.push(candidate);
-      }
-    }
-  }
-
-  const {tagsByDeclaration, definitionOnlyTags} = resolveRegistrations(
-    modules,
-    customElementDeclarations,
-    declarationsByModuleAndName,
-    context,
-  );
+  const records = indexManifest(manifest['modules'], context);
+  const {tagsByDeclaration, definitionOnlyTags} = resolveRegistrations(records, context);
 
   // Validate tag names and extract members. Keep the first declaration of each tag.
   // Invalid names and duplicate tags produce warnings and are skipped.
@@ -251,9 +171,7 @@ export function parseCustomElementsManifest(
     {
       declaration: CemDeclaration;
       registration: TagRegistrationRecord;
-      properties: Map<string, PropertyRecord>;
-      attributes: Map<string, AttributeRecord>;
-      events: Map<string, EventRecord>;
+      members: Pick<ParsedCustomElementSchema, 'properties' | 'attributes' | 'events'>;
     }
   >();
   for (const [declaration, {tagName, registration}] of tagsByDeclaration) {
@@ -289,12 +207,9 @@ export function parseCustomElementsManifest(
     const entry = {
       declaration,
       registration,
-      properties: new Map<string, PropertyRecord>(),
-      attributes: new Map<string, AttributeRecord>(),
-      events: new Map<string, EventRecord>(),
+      members: extractDeclarationSchema(declaration, tagName, context),
     };
     byTag.set(tagName, entry);
-    extractDeclarationSchema(declaration, tagName, entry, context);
   }
 
   // Tags with unresolved declarations have no custom members. Recognize the tag but continue
@@ -339,9 +254,9 @@ export function parseCustomElementsManifest(
   }
 
   const schemas: ParsedCustomElementSchema[] = [];
-  for (const [tagName, {declaration, registration, properties, attributes, events}] of byTag) {
+  for (const [tagName, {declaration, registration, members}] of byTag) {
     const declarationIdentity = declarationKey(declaration.modulePath, declaration.name);
-    const declarationExportCandidates = exportsByDeclarationIdentity.get(declarationIdentity);
+    const declarationExportCandidates = records.exports.get(declarationIdentity);
     const declarationExport = selectJavaScriptExport(
       declarationExportCandidates,
       declaration.name,
@@ -371,9 +286,7 @@ export function parseCustomElementsManifest(
           );
     schemas.push({
       tagName,
-      properties: Array.from(properties, ([name, record]) => ({name, ...record})),
-      attributes: Array.from(attributes, ([name, record]) => ({name, ...record})),
-      events: Array.from(events, ([name, record]) => ({name, ...record})),
+      ...members,
       ...instanceType,
       ...readDocs(declaration.node),
       ...(registration.deprecated !== undefined ? {deprecated: registration.deprecated} : {}),
@@ -389,25 +302,118 @@ interface DeclarationRegistration {
   hasHomeDefinition: boolean;
 }
 
-/** Resolves tag registrations separately from projecting declaration members. */
+/** Normalize declaration and export identities once, before resolving their relationships. */
+function indexManifest(
+  modules: unknown[],
+  {manifestLabel, warnings}: ParseContext,
+): ManifestRecords {
+  const records: ManifestRecords = {
+    declarations: new Map(),
+    elements: [],
+    exports: new Map(),
+    definitions: [],
+  };
+  for (const [index, module] of modules.entries()) {
+    if (
+      !isObject(module) ||
+      module['kind'] !== 'javascript-module' ||
+      typeof module['path'] !== 'string'
+    ) {
+      warnings.push({
+        kind: 'invalidStructure',
+        subject: `module[${index}]`,
+        message:
+          `${manifestLabel} contains an invalid module at index ${index}: Angular requires ` +
+          `kind "javascript-module" and a string path. The module is ignored; other valid ` +
+          `modules remain available.`,
+      });
+      continue;
+    }
+    const modulePath = module['path'];
+    for (const node of Array.isArray(module['declarations']) ? module['declarations'] : []) {
+      if (!isObject(node) || typeof node['name'] !== 'string') {
+        continue;
+      }
+      const declaration: CemDeclaration = {name: node['name'], modulePath, node};
+      const key = declarationKey(modulePath, declaration.name);
+      if (!records.declarations.has(key)) {
+        records.declarations.set(key, []);
+      }
+      records.declarations.get(key)!.push(declaration);
+      if (node['customElement'] === true) {
+        records.elements.push(declaration);
+      }
+    }
+    for (const entry of Array.isArray(module['exports']) ? module['exports'] : []) {
+      if (
+        !isObject(entry) ||
+        typeof entry['name'] !== 'string' ||
+        !isObject(entry['declaration']) ||
+        typeof entry['declaration']['name'] !== 'string'
+      ) {
+        continue;
+      }
+      const reference = entry['declaration'];
+      const name = reference['name'] as string;
+      const target = typeof reference['module'] === 'string' ? reference['module'] : modulePath;
+      const externalPackage =
+        typeof reference['package'] === 'string' ? reference['package'] : null;
+      if (entry['kind'] === 'custom-element-definition') {
+        records.definitions.push({
+          tagName: entry['name'],
+          externalPackage,
+          registration: tagRegistration(entry, name, target, modulePath, 'definition'),
+        });
+      } else if (entry['kind'] === 'js' && externalPackage === null) {
+        const key = declarationKey(target, name);
+        const candidate = {name: entry['name'], module: modulePath};
+        if (!records.exports.has(key)) {
+          records.exports.set(key, []);
+        }
+        const candidates = records.exports.get(key)!;
+        if (
+          !candidates.some(
+            (existing) => existing.name === candidate.name && existing.module === candidate.module,
+          )
+        ) {
+          candidates.push(candidate);
+        }
+      }
+    }
+  }
+  return records;
+}
+
+/**
+ * A declaration has one winning registration. One matching home definition may refine its
+ * tagName seed. Unresolved definitions are retained separately until resolved schemas are known.
+ */
 function resolveRegistrations(
-  modules: Array<{path: string; [key: string]: unknown}>,
-  customElementDeclarations: CemDeclaration[],
-  declarationsByModuleAndName: Map<string, CemDeclaration[]>,
+  {elements, declarations, definitions}: ManifestRecords,
   {manifestLabel, warnings}: ParseContext,
 ) {
-  // Read tag names from declarations and `custom-element-definition` exports. An export with an
-  // unresolved declaration still registers the tag, with no custom members in its schema.
   const tagsByDeclaration = new Map<CemDeclaration, DeclarationRegistration>();
   const definitionOnlyTags = new Map<
     string,
     {registration: TagRegistrationRecord; reason: string}
   >();
-  for (const declaration of customElementDeclarations) {
+  const duplicate = (
+    tagName: string,
+    winner: TagRegistrationRecord,
+    loser: TagRegistrationRecord,
+  ): void => {
+    warnings.push({
+      kind: 'duplicateTag',
+      subject: tagName,
+      message: duplicateRegistrationMessage(manifestLabel, tagName, winner, loser),
+    });
+  };
+  for (const declaration of elements) {
     const tagName = declaration.node['tagName'];
     if (typeof tagName === 'string' && tagName.length > 0) {
       tagsByDeclaration.set(declaration, {
         tagName,
+        hasHomeDefinition: false,
         registration: tagRegistration(
           declaration.node,
           declaration.name,
@@ -415,125 +421,63 @@ function resolveRegistrations(
           declaration.modulePath,
           'tagName',
         ),
-        hasHomeDefinition: false,
       });
     }
   }
-  for (const module of modules) {
-    if (!Array.isArray(module['exports'])) {
+  for (const {tagName, registration, externalPackage} of definitions) {
+    const referenced =
+      externalPackage === null
+        ? declarations.get(
+            declarationKey(registration.declarationModule, registration.declarationName),
+          )
+        : undefined;
+    if (referenced === undefined) {
+      const winner = definitionOnlyTags.get(tagName);
+      if (winner !== undefined) {
+        duplicate(tagName, winner.registration, registration);
+      } else {
+        definitionOnlyTags.set(tagName, {
+          registration,
+          reason:
+            externalPackage === null
+              ? 'cannot be found in the manifest'
+              : `is declared in another package ('${externalPackage}')`,
+        });
+      }
       continue;
     }
-    for (const exportEntry of module['exports']) {
-      if (
-        !isObject(exportEntry) ||
-        exportEntry['kind'] !== 'custom-element-definition' ||
-        typeof exportEntry['name'] !== 'string' ||
-        !isObject(exportEntry['declaration']) ||
-        typeof exportEntry['declaration']['name'] !== 'string'
+    for (const declaration of referenced) {
+      const next = {...registration, declarationModule: declaration.modulePath};
+      let tag = tagsByDeclaration.get(declaration);
+      if (tag === undefined) {
+        tag = {tagName, registration: next, hasHomeDefinition: false};
+        tagsByDeclaration.set(declaration, tag);
+      } else if (tag.tagName !== tagName) {
+        warnings.push({
+          kind: 'invalidStructure',
+          subject: `${registration.declarationName}#${tagName}`,
+          message:
+            `${manifestLabel} associates ${formatTagRegistration(tag.registration)} with the tag ` +
+            `'${tag.tagName}', but ${formatTagRegistration(next)} attempts to ` +
+            `register the same declaration as '${tagName}'. A custom element ` +
+            `declaration can have only one tag, so the first registration is retained and ` +
+            `the conflicting registration is ignored.`,
+        });
+      } else if (
+        tag.registration.source === 'tagName' &&
+        next.registrationModule === declaration.modulePath
       ) {
-        continue;
+        tag.registration = next;
+      } else {
+        duplicate(tagName, tag.registration, next);
       }
-      const definitionTagName = exportEntry['name'];
-      const definitionDeclarationName = exportEntry['declaration']['name'];
-      const containingModule = module.path;
-      const recordDefinitionOnly = (reason: string, declarationModule: string): void => {
-        const registration = tagRegistration(
-          exportEntry,
-          definitionDeclarationName,
-          declarationModule,
-          containingModule,
-          'definition',
-        );
-        const winner = definitionOnlyTags.get(definitionTagName);
-        if (winner === undefined) {
-          definitionOnlyTags.set(definitionTagName, {registration, reason});
-        } else {
-          warnings.push({
-            kind: 'duplicateTag',
-            subject: definitionTagName,
-            message: duplicateRegistrationMessage(
-              manifestLabel,
-              definitionTagName,
-              winner.registration,
-              registration,
-            ),
-          });
-        }
-      };
-      // External declarations are unavailable in this manifest. The definition still registers the tag.
-      if (typeof exportEntry['declaration']['package'] === 'string') {
-        recordDefinitionOnly(
-          `is declared in another package ('${exportEntry['declaration']['package']}')`,
-          typeof exportEntry['declaration']['module'] === 'string'
-            ? exportEntry['declaration']['module']
-            : containingModule,
-        );
-        continue;
-      }
-      const declarationModule = exportEntry['declaration']['module'];
-      const referencedModule =
-        typeof declarationModule === 'string' ? declarationModule : containingModule;
-      const referenced = declarationsByModuleAndName.get(
-        declarationKey(referencedModule, exportEntry['declaration']['name']),
-      );
-      if (referenced === undefined) {
-        recordDefinitionOnly('cannot be found in the manifest', referencedModule);
-        continue;
-      }
-      for (const declaration of referenced) {
-        const declarationHomeModule = declaration.modulePath;
-        const registration = tagRegistration(
-          exportEntry,
-          definitionDeclarationName,
-          declarationHomeModule,
-          containingModule,
-          'definition',
-        );
-        let tag = tagsByDeclaration.get(declaration);
-        if (tag === undefined) {
-          tag = {tagName: definitionTagName, registration, hasHomeDefinition: false};
-          tagsByDeclaration.set(declaration, tag);
-        } else {
-          const {tagName: winningTagName, registration: winner} = tag;
-          if (winningTagName !== definitionTagName) {
-            warnings.push({
-              kind: 'invalidStructure',
-              subject: `${definitionDeclarationName}#${definitionTagName}`,
-              message:
-                `${manifestLabel} associates ${formatTagRegistration(winner)} with the tag ` +
-                `'${winningTagName}', but ${formatTagRegistration(registration)} attempts to ` +
-                `register the same declaration as '${definitionTagName}'. A custom element ` +
-                `declaration can have only one tag, so the first registration is retained and ` +
-                `the conflicting registration is ignored.`,
-            });
-          } else if (winner.source === 'tagName' && containingModule === declarationHomeModule) {
-            // A declaration's tagName registers the tag. One matching definition export in the same
-            // module adds registration metadata. Further definitions count as duplicates.
-            tag.registration = registration;
-          } else {
-            warnings.push({
-              kind: 'duplicateTag',
-              subject: definitionTagName,
-              message: duplicateRegistrationMessage(
-                manifestLabel,
-                definitionTagName,
-                winner,
-                registration,
-              ),
-            });
-          }
-        }
-        if (containingModule === declarationHomeModule && tag.tagName === definitionTagName) {
-          tag.hasHomeDefinition = true;
-        }
+      if (next.registrationModule === declaration.modulePath && tag.tagName === tagName) {
+        tag.hasHomeDefinition = true;
       }
     }
   }
-
-  for (const declaration of customElementDeclarations) {
+  for (const declaration of elements) {
     const tagName = declaration.node['tagName'];
-    // CEM requires a matching definition export in the same module as a declaration with `tagName`.
-    // Registrations in other modules provide the tag through `tagsByDeclaration` instead.
     if (
       typeof tagName === 'string' &&
       tagName.length > 0 &&
@@ -550,7 +494,6 @@ function resolveRegistrations(
       });
     }
   }
-
   return {tagsByDeclaration, definitionOnlyTags};
 }
 

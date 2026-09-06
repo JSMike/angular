@@ -27,6 +27,12 @@ import {NgCompilerOptions} from '../api';
 
 import {freshCompilationTicket, NgCompiler, resourceChangeTicket} from '../src/compiler';
 import {NgCompilerHost} from '../src/host';
+import {
+  createDefinitionExport,
+  createManifest,
+  createManifestElement,
+  createManifestModule,
+} from '../../custom_elements_manifest/testing';
 
 function makeFreshCompiler(
   host: NgCompilerHost,
@@ -103,60 +109,36 @@ runInEachFileSystem(() => {
       expect(diags[0].messageText).toContain('does_not_exist');
     });
 
-    it('should diagnose an invalid customElementsManifests option without throwing', () => {
-      const sourceFile = _('/cmp.ts');
-      fs.writeFile(sourceFile, `export class Cmp {}`);
-      const options: NgCompilerOptions = {
-        customElementsManifests: [42] as unknown as string[],
-      };
-      const baseHost = new NgtscCompilerHost(getFileSystem(), options);
-      const host = NgCompilerHost.wrap(baseHost, [sourceFile], options, /* oldProgram */ null);
-      const program = ts.createProgram({host, options, rootNames: host.inputFiles});
-      const compiler = makeFreshCompiler(
-        host,
-        options,
-        program,
-        new TsCreateProgramDriver(program, host, options, []),
-        new NoopIncrementalBuildStrategy(),
-        /** enableTemplateTypeChecker */ false,
-        /* usePoisonedData */ false,
-      );
+    for (const [option, value] of [
+      ['customElementsManifests', [42]],
+      ['customElementsManifestsDiagnostics', 'loud'],
+    ] as const) {
+      it(`should diagnose an invalid ${option} option without throwing`, () => {
+        const sourceFile = _('/cmp.ts');
+        fs.writeFile(sourceFile, `export class Cmp {}`);
+        const options = {[option]: value} as unknown as NgCompilerOptions;
+        const baseHost = new NgtscCompilerHost(getFileSystem(), options);
+        const host = NgCompilerHost.wrap(baseHost, [sourceFile], options, /* oldProgram */ null);
+        const program = ts.createProgram({host, options, rootNames: host.inputFiles});
+        const compiler = makeFreshCompiler(
+          host,
+          options,
+          program,
+          new TsCreateProgramDriver(program, host, options, []),
+          new NoopIncrementalBuildStrategy(),
+          /** enableTemplateTypeChecker */ false,
+          /* usePoisonedData */ false,
+        );
 
-      const diagnostics = compiler.getOptionDiagnostics();
-      expect(diagnostics.length).toBe(1);
-      expect(diagnostics[0].code).toBe(
-        ngErrorCode(ErrorCode.CONFIG_CUSTOM_ELEMENTS_MANIFEST_INVALID_OPTION),
-      );
-      expect(diagnostics[0].category).toBe(ts.DiagnosticCategory.Error);
-    });
-
-    it('should diagnose an invalid customElementsManifestsDiagnostics option without throwing', () => {
-      const sourceFile = _('/cmp.ts');
-      fs.writeFile(sourceFile, `export class Cmp {}`);
-      const options: NgCompilerOptions = {
-        customElementsManifestsDiagnostics: 'loud' as unknown as 'summary',
-      };
-      const baseHost = new NgtscCompilerHost(getFileSystem(), options);
-      const host = NgCompilerHost.wrap(baseHost, [sourceFile], options, /* oldProgram */ null);
-      const program = ts.createProgram({host, options, rootNames: host.inputFiles});
-      const compiler = makeFreshCompiler(
-        host,
-        options,
-        program,
-        new TsCreateProgramDriver(program, host, options, []),
-        new NoopIncrementalBuildStrategy(),
-        /** enableTemplateTypeChecker */ false,
-        /* usePoisonedData */ false,
-      );
-
-      const diagnostics = compiler.getOptionDiagnostics();
-      expect(diagnostics.length).toBe(1);
-      expect(diagnostics[0].code).toBe(
-        ngErrorCode(ErrorCode.CONFIG_CUSTOM_ELEMENTS_MANIFEST_INVALID_OPTION),
-      );
-      expect(diagnostics[0].category).toBe(ts.DiagnosticCategory.Error);
-      expect(diagnostics[0].messageText).toContain('customElementsManifestsDiagnostics');
-    });
+        const diagnostics = compiler.getOptionDiagnostics();
+        expect(diagnostics.length).toBe(1);
+        expect(diagnostics[0].code).toBe(
+          ngErrorCode(ErrorCode.CONFIG_CUSTOM_ELEMENTS_MANIFEST_INVALID_OPTION),
+        );
+        expect(diagnostics[0].category).toBe(ts.DiagnosticCategory.Error);
+        expect(diagnostics[0].messageText).toContain(option);
+      });
+    }
 
     describe('getComponentsWithTemplateFile', () => {
       it('should return the component(s) using a template file', () => {
@@ -442,23 +424,14 @@ runInEachFileSystem(() => {
         `,
         );
         const manifest = (tagName: string) =>
-          JSON.stringify({
-            schemaVersion: '1.0.0',
-            modules: [
-              {
-                kind: 'javascript-module',
-                path: 'element.js',
+          JSON.stringify(
+            createManifest([
+              createManifestModule('element.js', {
                 declarations: [{kind: 'class', name: 'ElementClass', customElement: true, tagName}],
-                exports: [
-                  {
-                    kind: 'custom-element-definition',
-                    name: tagName,
-                    declaration: {name: 'ElementClass'},
-                  },
-                ],
-              },
-            ],
-          });
+                exports: [createDefinitionExport(tagName, 'ElementClass')],
+              }),
+            ]),
+          );
         fs.writeFile(MANIFEST, manifest('old-element'));
 
         const options: NgCompilerOptions = {
@@ -527,30 +500,14 @@ runInEachFileSystem(() => {
         );
         fs.writeFile(
           MANIFEST,
-          JSON.stringify({
-            schemaVersion: '1.0.0',
-            modules: [
-              {
-                kind: 'javascript-module',
-                path: 'element.js',
-                declarations: [
-                  {
-                    kind: 'class',
-                    name: 'NewElement',
-                    customElement: true,
-                    tagName: 'new-element',
-                  },
-                ],
-                exports: [
-                  {
-                    kind: 'custom-element-definition',
-                    name: 'new-element',
-                    declaration: {name: 'NewElement'},
-                  },
-                ],
-              },
-            ],
-          }),
+          JSON.stringify(
+            createManifest([
+              createManifestModule('element.js', {
+                declarations: [createManifestElement('NewElement', 'new-element')],
+                exports: [createDefinitionExport('new-element', 'NewElement')],
+              }),
+            ]),
+          ),
         );
 
         const compilerB = NgCompiler.fromTicket(
@@ -567,23 +524,14 @@ runInEachFileSystem(() => {
         const TEMPLATE = _('/cmp.html');
         const MANIFEST = _('/custom-elements.json');
         const manifest = (tagName: string) =>
-          JSON.stringify({
-            schemaVersion: '1.0.0',
-            modules: [
-              {
-                kind: 'javascript-module',
-                path: 'element.js',
+          JSON.stringify(
+            createManifest([
+              createManifestModule('element.js', {
                 declarations: [{kind: 'class', name: 'ElementClass', customElement: true, tagName}],
-                exports: [
-                  {
-                    kind: 'custom-element-definition',
-                    name: tagName,
-                    declaration: {name: 'ElementClass'},
-                  },
-                ],
-              },
-            ],
-          });
+                exports: [createDefinitionExport(tagName, 'ElementClass')],
+              }),
+            ]),
+          );
         fs.writeFile(
           COMPONENT,
           `
@@ -630,25 +578,16 @@ runInEachFileSystem(() => {
           const COMPONENT = _('/cmp.ts');
           const PACKAGE_JSON = _('/node_modules/@my/lib/package.json');
           const manifest = (tagName: string) =>
-            JSON.stringify({
-              schemaVersion: '1.0.0',
-              modules: [
-                {
-                  kind: 'javascript-module',
-                  path: 'element.js',
+            JSON.stringify(
+              createManifest([
+                createManifestModule('element.js', {
                   declarations: [
                     {kind: 'class', name: 'ElementClass', customElement: true, tagName},
                   ],
-                  exports: [
-                    {
-                      kind: 'custom-element-definition',
-                      name: tagName,
-                      declaration: {name: 'ElementClass'},
-                    },
-                  ],
-                },
-              ],
-            });
+                  exports: [createDefinitionExport(tagName, 'ElementClass')],
+                }),
+              ]),
+            );
           fs.writeFile(
             COMPONENT,
             `

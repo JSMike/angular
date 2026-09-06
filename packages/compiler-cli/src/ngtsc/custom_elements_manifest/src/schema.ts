@@ -9,6 +9,19 @@
 import {ɵCustomElementsManifestSchema as CustomElementsManifestSchema} from '@angular/compiler';
 import {ValidatedCheckType} from './check_type';
 
+/** Shared size limit for type validation and display text. */
+export const MAX_TYPE_TEXT_LENGTH = 512;
+
+/** Narrows an untrusted JSON value to a plain object. */
+export function isObject(value: unknown): value is {[key: string]: unknown} {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/** The text of a typed CEM record, before syntax validation. */
+export function typeTextOf(type: unknown): string | undefined {
+  return isObject(type) && typeof type['text'] === 'string' ? type['text'] : undefined;
+}
+
 type CustomElementsManifestProperty = CustomElementsManifestSchema['properties'][number];
 type CustomElementsManifestEvent = CustomElementsManifestSchema['events'][number];
 type CustomElementsManifestAttribute = CustomElementsManifestSchema['attributes'][number];

@@ -9,6 +9,12 @@
 import ts from 'typescript';
 
 import {createModuleAndProjectWithDeclarations, LanguageServiceTestEnv, Project} from '../testing';
+import {
+  createDefinitionExport,
+  createManifest,
+  createManifestElement,
+  createManifestModule,
+} from '../../compiler-cli/src/ngtsc/custom_elements_manifest/testing';
 
 function quickInfoSkeleton(): {[fileName: string]: string} {
   return {
@@ -1436,80 +1442,65 @@ describe('quick info', () => {
 
 describe('quick info for custom elements manifests', () => {
   function setupWithManifest(template: string) {
-    const manifest = {
-      schemaVersion: '1.0.0',
-      modules: [
-        {
-          kind: 'javascript-module',
-          path: 'my-button.js',
-          declarations: [
-            {
-              kind: 'class',
-              name: 'MyButton',
-              customElement: true,
-              tagName: 'my-button',
-              description: 'A themed button.',
-              members: [
-                {
-                  kind: 'field',
-                  name: 'label',
-                  type: {text: 'string'},
-                  description: 'The button label.',
+    const manifest = createManifest([
+      createManifestModule('my-button.js', {
+        declarations: [
+          createManifestElement('MyButton', 'my-button', {
+            description: 'A themed button.',
+            members: [
+              {
+                kind: 'field',
+                name: 'label',
+                type: {text: 'string'},
+                description: 'The button label.',
+              },
+              {
+                kind: 'field',
+                name: 'disabled',
+                type: {text: 'boolean'},
+                deprecated: 'Use aria-disabled instead.',
+              },
+              {
+                kind: 'field',
+                name: 'propertyOnlyName',
+                type: {text: 'string'},
+                description: 'Property-only documentation.',
+              },
+            ],
+            attributes: [
+              {
+                name: 'label',
+                fieldName: 'label',
+                type: {text: 'string'},
+                description: 'The label attribute.',
+              },
+              {
+                name: 'attribute-only-name',
+                type: {text: 'string'},
+                description: 'Attribute-only documentation.',
+              },
+            ],
+            events: [
+              {
+                name: 'activate',
+                type: {text: 'UnresolvedActivateEvent'},
+                description: 'Fired when the button activates.',
+                deprecated: 'Use invoke instead.',
+              },
+              {
+                name: 'click',
+                type: {
+                  text: 'CustomEvent<{value: string}>',
+                  references: [{name: 'CustomEvent', package: 'global:', start: 0, end: 11}],
                 },
-                {
-                  kind: 'field',
-                  name: 'disabled',
-                  type: {text: 'boolean'},
-                  deprecated: 'Use aria-disabled instead.',
-                },
-                {
-                  kind: 'field',
-                  name: 'propertyOnlyName',
-                  type: {text: 'string'},
-                  description: 'Property-only documentation.',
-                },
-              ],
-              attributes: [
-                {
-                  name: 'label',
-                  fieldName: 'label',
-                  type: {text: 'string'},
-                  description: 'The label attribute.',
-                },
-                {
-                  name: 'attribute-only-name',
-                  type: {text: 'string'},
-                  description: 'Attribute-only documentation.',
-                },
-              ],
-              events: [
-                {
-                  name: 'activate',
-                  type: {text: 'UnresolvedActivateEvent'},
-                  description: 'Fired when the button activates.',
-                  deprecated: 'Use invoke instead.',
-                },
-                {
-                  name: 'click',
-                  type: {
-                    text: 'CustomEvent<{value: string}>',
-                    references: [{name: 'CustomEvent', package: 'global:', start: 0, end: 11}],
-                  },
-                  description: 'Fired when the custom button activates.',
-                },
-              ],
-            },
-          ],
-          exports: [
-            {
-              kind: 'custom-element-definition',
-              name: 'my-button',
-              declaration: {name: 'MyButton'},
-            },
-          ],
-        },
-      ],
-    };
+                description: 'Fired when the custom button activates.',
+              },
+            ],
+          }),
+        ],
+        exports: [createDefinitionExport('my-button', 'MyButton')],
+      }),
+    ]);
     const env = LanguageServiceTestEnv.setup();
     const project = env.addProject(
       'test-cem',

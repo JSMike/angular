@@ -20,6 +20,12 @@ import {
   TestableOptions,
 } from '../testing';
 import {getSharedEnv} from './shared_env';
+import {
+  createDefinitionExport,
+  createManifest,
+  createManifestElement,
+  createManifestModule,
+} from '../../compiler-cli/src/ngtsc/custom_elements_manifest/testing';
 
 const DIR_WITH_INPUT = {
   'Dir': `
@@ -2325,91 +2331,76 @@ describe('completions', () => {
       strictAttributeTypes?: boolean,
       directive = '',
     ): OpenBuffer {
-      const manifest = {
-        schemaVersion: '1.0.0',
-        modules: [
-          {
-            kind: 'javascript-module',
-            path: 'my-button.js',
-            declarations: [
-              {
-                kind: 'class',
-                name: 'MyButton',
-                customElement: true,
-                tagName: 'my-button',
-                description: 'A themed button.',
-                members: [
-                  {
-                    kind: 'field',
-                    name: 'label',
-                    type: {text: 'string'},
-                    description: 'The button label.',
+      const manifest = createManifest([
+        createManifestModule('my-button.js', {
+          declarations: [
+            createManifestElement('MyButton', 'my-button', {
+              description: 'A themed button.',
+              members: [
+                {
+                  kind: 'field',
+                  name: 'label',
+                  type: {text: 'string'},
+                  description: 'The button label.',
+                },
+                {
+                  kind: 'field',
+                  name: 'disabled',
+                  type: {text: 'boolean'},
+                  description: 'Whether the button is disabled.',
+                  deprecated: 'Use aria-disabled instead.',
+                },
+                {
+                  kind: 'field',
+                  name: 'readonly',
+                  attribute: 'readonly',
+                  type: {text: 'boolean'},
+                },
+                {
+                  kind: 'field',
+                  name: 'variant',
+                  attribute: 'variant',
+                  type: {text: "'primary' | 'secondary'"},
+                  description: 'The button variant.',
+                  default: 'primary',
+                },
+              ],
+              attributes: [
+                {
+                  name: 'button-label',
+                  fieldName: 'label',
+                  description: 'The label attribute.',
+                },
+                {name: 'label', description: 'The same-named label attribute.'},
+                {name: 'data-mode', description: 'Attribute only.'},
+                {name: 'title', description: 'The title attribute.'},
+                {name: 'readonly', fieldName: 'readonly'},
+                {
+                  name: 'variant',
+                  fieldName: 'variant',
+                  type: {text: "'primary' | 'secondary'"},
+                  description: 'The variant attribute.',
+                  default: 'primary',
+                },
+              ],
+              events: [
+                {name: 'itemselect', type: {text: 'UnresolvedItemSelectEvent'}, deprecated: true},
+                {
+                  name: 'click',
+                  type: {
+                    text: 'CustomEvent<{value: string}>',
+                    references: [{name: 'CustomEvent', package: 'global:', start: 0, end: 11}],
                   },
-                  {
-                    kind: 'field',
-                    name: 'disabled',
-                    type: {text: 'boolean'},
-                    description: 'Whether the button is disabled.',
-                    deprecated: 'Use aria-disabled instead.',
-                  },
-                  {
-                    kind: 'field',
-                    name: 'readonly',
-                    attribute: 'readonly',
-                    type: {text: 'boolean'},
-                  },
-                  {
-                    kind: 'field',
-                    name: 'variant',
-                    attribute: 'variant',
-                    type: {text: "'primary' | 'secondary'"},
-                    description: 'The button variant.',
-                    default: 'primary',
-                  },
-                ],
-                attributes: [
-                  {
-                    name: 'button-label',
-                    fieldName: 'label',
-                    description: 'The label attribute.',
-                  },
-                  {name: 'label', description: 'The same-named label attribute.'},
-                  {name: 'data-mode', description: 'Attribute only.'},
-                  {name: 'title', description: 'The title attribute.'},
-                  {name: 'readonly', fieldName: 'readonly'},
-                  {
-                    name: 'variant',
-                    fieldName: 'variant',
-                    type: {text: "'primary' | 'secondary'"},
-                    description: 'The variant attribute.',
-                    default: 'primary',
-                  },
-                ],
-                events: [
-                  {name: 'itemselect', type: {text: 'UnresolvedItemSelectEvent'}, deprecated: true},
-                  {
-                    name: 'click',
-                    type: {
-                      text: 'CustomEvent<{value: string}>',
-                      references: [{name: 'CustomEvent', package: 'global:', start: 0, end: 11}],
-                    },
-                    description: 'Fired when the custom button activates.',
-                  },
-                  {name: 'labelChange', type: {text: 'unknown'}},
-                  {name: 'label', type: {text: 'unknown'}, description: 'The label event.'},
-                ],
-              },
-            ],
-            exports: [
-              {
-                kind: 'custom-element-definition',
-                name: 'my-button',
-                declaration: {name: 'MyButton'},
-              },
-            ],
-          },
-        ],
-      };
+                  description: 'Fired when the custom button activates.',
+                },
+                {name: 'labelChange', type: {text: 'unknown'}},
+                {name: 'label', type: {text: 'unknown'}, description: 'The label event.'},
+              ],
+            }),
+          ],
+          exports: [createDefinitionExport('my-button', 'MyButton')],
+        }),
+      ]);
       const env = getSharedEnv();
       const project = env.addProject(
         'test-cem',
@@ -2736,45 +2727,30 @@ describe('completions', () => {
 
     for (const alias of ["'primary' | 'secondary'", "Lowercase<'PRIMARY' | 'SECONDARY'>"]) {
       it(`should complete referenced static literal union ${alias}`, () => {
-        const manifest = {
-          schemaVersion: '1.0.0',
-          modules: [
-            {
-              kind: 'javascript-module',
-              path: 'button.js',
-              declarations: [
-                {
-                  kind: 'class',
-                  name: 'Button',
-                  customElement: true,
-                  tagName: 'button-box',
-                  members: [
-                    {
-                      kind: 'field',
-                      name: 'variant',
-                      attribute: 'variant',
-                      type: {
-                        text: 'ButtonVariant',
-                        references: [
-                          {name: 'ButtonVariant', module: 'button.js', start: 0, end: 13},
-                        ],
-                      },
+        const manifest = createManifest([
+          createManifestModule('button.js', {
+            declarations: [
+              createManifestElement('Button', 'button-box', {
+                members: [
+                  {
+                    kind: 'field',
+                    name: 'variant',
+                    attribute: 'variant',
+                    type: {
+                      text: 'ButtonVariant',
+                      references: [{name: 'ButtonVariant', module: 'button.js', start: 0, end: 13}],
                     },
-                  ],
-                  attributes: [{name: 'variant', fieldName: 'variant'}],
-                },
-              ],
-              exports: [
-                {kind: 'js', name: 'Button', declaration: {name: 'Button'}},
-                {
-                  kind: 'custom-element-definition',
-                  name: 'button-box',
-                  declaration: {name: 'Button'},
-                },
-              ],
-            },
-          ],
-        };
+                  },
+                ],
+                attributes: [{name: 'variant', fieldName: 'variant'}],
+              }),
+            ],
+            exports: [
+              {kind: 'js', name: 'Button', declaration: {name: 'Button'}},
+              createDefinitionExport('button-box', 'Button'),
+            ],
+          }),
+        ]);
         const project = getSharedEnv().addProject(
           'test-cem-reference-completion',
           {

@@ -8,7 +8,7 @@
 
 import ts from 'typescript';
 
-import {isObject, MAX_TYPE_TEXT_LENGTH, parseTypeText, TYPE_TEXT_ALIAS_PREFIX} from './type_text';
+import {isObject, MAX_TYPE_TEXT_LENGTH} from './schema';
 
 /** An `import("<specifier>").<Name>` type query within a check type. */
 export interface CheckTypeImport {
@@ -69,21 +69,10 @@ export function computeCheckType(
     return {checkType: null, failure: 'typeTextTooLong'};
   }
 
-  const scannedIdentifiers = scanTypeText(text);
-  if (scannedIdentifiers === null) {
+  const namedIdentifiers = typeReferenceIdentifiers(text);
+  if (namedIdentifiers === null) {
     return {checkType: null, failure: 'unsupportedTypeText'};
   }
-
-  const propertyNameSpans = findPropertySignatureNameSpans(text);
-  if (propertyNameSpans === null) {
-    return {checkType: null, failure: 'unsupportedTypeText'};
-  }
-  // Collect the identifier occurrences that are not built-in keywords.
-  const namedIdentifiers = scannedIdentifiers.filter(
-    (id) =>
-      !ALLOWED_IDENTIFIERS.has(id.text) &&
-      !propertyNameSpans.has(identifierOccurrenceKey(id.start, id.end)),
-  );
 
   // Each named type requires a reference that covers the identifier's full span.
   const references = Array.isArray(cemType['references']) ? cemType['references'] : [];
@@ -133,59 +122,8 @@ export function computeCheckType(
     reference.end -= leadingWhitespace;
   }
 
-  return isSyntacticallyValidType(result)
-    ? {checkType: result, imports, globals: Array.from(globals)}
-    : {checkType: null, failure: 'unsupportedTypeText'};
+  return {checkType: result, imports, globals: Array.from(globals)};
 }
-
-/** TypeScript built-in type keywords permitted in check types. */
-const ALLOWED_IDENTIFIERS = new Set<string>([
-  'string',
-  'number',
-  'boolean',
-  'true',
-  'false',
-  'null',
-  'undefined',
-  'void',
-  'any',
-  'unknown',
-  'never',
-  'object',
-  'bigint',
-  'readonly',
-]);
-
-/**
- * Punctuation allowed outside string literals. Excludes `; \ = @ / * ! # % ^ ~ +` to reject
- * statements, comments, escapes, arrow function types, and decorators.
- */
-const ALLOWED_PUNCTUATION = new Set<string>([
-  '[',
-  ']',
-  '(',
-  ')',
-  '{',
-  '}',
-  '<',
-  '>',
-  '|',
-  '&',
-  ',',
-  '.',
-  ':',
-  '?',
-  '-',
-  ' ',
-  '\t',
-  '\n',
-  '\r',
-]);
-
-const IDENTIFIER_START = /[A-Za-z_$]/;
-const IDENTIFIER_PART = /[A-Za-z0-9_$]/;
-const REFERENCE_NAME = /^[A-Za-z_$][A-Za-z0-9_$]*$/;
-const PACKAGE_NAME_CHARACTERS = /^[A-Za-z0-9._-]+$/;
 
 interface IdentifierOccurrence {
   text: string;
@@ -193,113 +131,143 @@ interface IdentifierOccurrence {
   end: number;
 }
 
+// Syntax depends only on the author text. Keep its compact result, so repeated types need
+// neither an AST traversal nor retained SourceFiles. Package references are resolved per use.
+const typeIdentifiers = new Map<string, readonly IdentifierOccurrence[] | null>();
+const MAX_CACHED_TYPES = 2048;
+
+function typeReferenceIdentifiers(text: string): readonly IdentifierOccurrence[] | null {
+  let result = typeIdentifiers.get(text);
+  if (result === undefined) {
+    result = parseTypeReferenceIdentifiers(text);
+    if (typeIdentifiers.size >= MAX_CACHED_TYPES) {
+      typeIdentifiers.clear();
+    }
+    typeIdentifiers.set(text, result);
+  }
+  return result;
+}
+
 /**
- * Returns the source spans of identifier names in object property signatures. These names need
- * no type reference, as in `{value: string}`. Other identifiers still require references,
- * including method names, index signature parameters, and computed property names.
+ * Validate the supported type AST and collect only names in type-reference positions. The
+ * parser owns syntax and delimiter validation; lexical checks retain the existing restricted
+ * character set, including rejecting comments and escapes. No second parse is needed after
+ * replacing these identifiers with validated import types.
  */
-function findPropertySignatureNameSpans(text: string): Set<string> | null {
-  const source = parseTypeText(text);
-  if (!hasExactlyOneTypeAlias(source)) {
+function parseTypeReferenceIdentifiers(text: string): IdentifierOccurrence[] | null {
+  const prefix = 'type __CustomElementsManifestTypeText = (';
+  const source = ts.createSourceFile(
+    'custom-elements-manifest-type-text.ts',
+    `${prefix}${text});`,
+    ts.ScriptTarget.Latest,
+    false,
+    ts.ScriptKind.TS,
+  );
+  const diagnostics = (source as ts.SourceFile & {parseDiagnostics?: readonly ts.Diagnostic[]})
+    .parseDiagnostics;
+  if (
+    diagnostics?.length ||
+    source.statements.length !== 1 ||
+    !ts.isTypeAliasDeclaration(source.statements[0]) ||
+    // The input must stay inside the parser's wrapper, rather than close and reopen it.
+    !ts.isParenthesizedTypeNode(source.statements[0].type)
+  ) {
     return null;
   }
-  const spans = new Set<string>();
-  const visit = (node: ts.Node): void => {
-    if (ts.isPropertySignature(node) && ts.isIdentifier(node.name)) {
-      const start = node.name.getStart(source) - TYPE_TEXT_ALIAS_PREFIX.length;
-      const end = node.name.getEnd() - TYPE_TEXT_ALIAS_PREFIX.length;
-      if (start >= 0 && end <= text.length) {
-        spans.add(identifierOccurrenceKey(start, end));
-      }
-    }
-    ts.forEachChild(node, visit);
-  };
-  visit(source);
-  return spans;
-}
-
-function identifierOccurrenceKey(start: number, end: number): string {
-  return `${start}:${end}`;
-}
-
-/**
- * Checks type text against the allowed characters and records identifiers outside string
- * literals. Returns `null` for disallowed text.
- */
-function scanTypeText(text: string): IdentifierOccurrence[] | null {
   const identifiers: IdentifierOccurrence[] = [];
-  const brackets: string[] = [];
-  let i = 0;
-  while (i < text.length) {
-    const char = text[i];
-
-    if (char === "'" || char === '"' || char === '`') {
-      const end = scanStringLiteral(text, i);
-      if (end === -1) {
-        return null;
+  let outsideLiterals = '';
+  let cursor = 0;
+  const literal = (node: ts.Node): boolean => {
+    const start = node.getStart(source) - prefix.length;
+    const end = node.getEnd() - prefix.length;
+    const raw = text.slice(start, end);
+    if (/[\\\u0000-\u001f\u2028\u2029]/.test(raw)) {
+      return false;
+    }
+    outsideLiterals += text.slice(cursor, start);
+    cursor = end;
+    return true;
+  };
+  const visit = (node: ts.Node): boolean => {
+    switch (node.kind) {
+      case ts.SyntaxKind.AnyKeyword:
+      case ts.SyntaxKind.UnknownKeyword:
+      case ts.SyntaxKind.NeverKeyword:
+      case ts.SyntaxKind.StringKeyword:
+      case ts.SyntaxKind.NumberKeyword:
+      case ts.SyntaxKind.BooleanKeyword:
+      case ts.SyntaxKind.BigIntKeyword:
+      case ts.SyntaxKind.ObjectKeyword:
+      case ts.SyntaxKind.VoidKeyword:
+      case ts.SyntaxKind.UndefinedKeyword:
+      case ts.SyntaxKind.TrueKeyword:
+      case ts.SyntaxKind.FalseKeyword:
+      case ts.SyntaxKind.NullKeyword:
+      case ts.SyntaxKind.NumericLiteral:
+        return true;
+      case ts.SyntaxKind.StringLiteral:
+      case ts.SyntaxKind.NoSubstitutionTemplateLiteral:
+        return literal(node);
+    }
+    if (ts.isTypeReferenceNode(node)) {
+      if (!ts.isIdentifier(node.typeName) || node.typeArguments?.length === 0) {
+        return false;
       }
-      i = end;
-      continue;
+      identifiers.push({
+        text: node.typeName.text,
+        start: node.typeName.getStart(source) - prefix.length,
+        end: node.typeName.getEnd() - prefix.length,
+      });
+      return node.typeArguments?.every(visit) ?? true;
     }
-
-    if (IDENTIFIER_START.test(char)) {
-      const start = i;
-      while (i < text.length && IDENTIFIER_PART.test(text[i])) {
-        i++;
-      }
-      identifiers.push({text: text.slice(start, i), start, end: i});
-      continue;
+    if (ts.isTypeLiteralNode(node)) {
+      return node.members.every(
+        (member) =>
+          ts.isPropertySignature(member) &&
+          (ts.isIdentifier(member.name) ||
+            (ts.isStringLiteral(member.name) && literal(member.name)) ||
+            ts.isNumericLiteral(member.name)) &&
+          (member.modifiers?.every((modifier) => modifier.kind === ts.SyntaxKind.ReadonlyKeyword) ??
+            true) &&
+          (member.type === undefined || visit(member.type)),
+      );
     }
-
-    if (char >= '0' && char <= '9') {
-      i++;
-      continue;
+    if (ts.isUnionTypeNode(node) || ts.isIntersectionTypeNode(node)) {
+      return node.types.every(visit);
     }
-
-    if (!ALLOWED_PUNCTUATION.has(char)) {
-      return null;
+    if (ts.isTupleTypeNode(node)) {
+      return node.elements.every(visit);
     }
-    if (char === '(' || char === '[' || char === '{' || char === '<') {
-      brackets.push(char);
-    } else if (char === ')' || char === ']' || char === '}' || char === '>') {
-      const open = brackets.pop();
-      if (
-        (char === ')' && open !== '(') ||
-        (char === ']' && open !== '[') ||
-        (char === '}' && open !== '{') ||
-        (char === '>' && open !== '<')
-      ) {
-        return null;
-      }
+    if (ts.isArrayTypeNode(node)) {
+      return visit(node.elementType);
     }
-    i++;
-  }
-  if (brackets.length > 0) {
+    if (
+      ts.isParenthesizedTypeNode(node) ||
+      ts.isOptionalTypeNode(node) ||
+      ts.isRestTypeNode(node)
+    ) {
+      return visit(node.type);
+    }
+    if (ts.isTypeOperatorNode(node)) {
+      return node.operator === ts.SyntaxKind.ReadonlyKeyword && visit(node.type);
+    }
+    if (ts.isIndexedAccessTypeNode(node)) {
+      return visit(node.objectType) && visit(node.indexType);
+    }
+    if (ts.isLiteralTypeNode(node)) {
+      return visit(node.literal);
+    }
+    return (
+      ts.isPrefixUnaryExpression(node) &&
+      node.operator === ts.SyntaxKind.MinusToken &&
+      ts.isNumericLiteral(node.operand)
+    );
+  };
+  if (!visit(source.statements[0].type)) {
     return null;
   }
-  return identifiers;
-}
-
-/**
- * Scans a string literal from its opening delimiter at `start`. Returns the index after the
- * closing delimiter, or -1 for an unterminated literal, escapes, template interpolation,
- * control characters, or line separators.
- */
-function scanStringLiteral(text: string, start: number): number {
-  const delimiter = text[start];
-  for (let i = start + 1; i < text.length; i++) {
-    const char = text[i];
-    if (char === delimiter) {
-      return i + 1;
-    }
-    if (char === '\\' || char < ' ' || char === '\u2028' || char === '\u2029') {
-      return -1;
-    }
-    if (delimiter === '`' && char === '$' && text[i + 1] === '{') {
-      return -1;
-    }
-  }
-  return -1;
+  outsideLiterals += text.slice(cursor);
+  return /[^A-Za-z0-9_$[\](){}<>|&,.:? \t\r\n-]/.test(outsideLiterals) ? null : identifiers;
 }
 
 /**
@@ -316,30 +284,15 @@ function findCoveringReferenceReplacement(
   containingModule: string | null,
 ): string | null | undefined {
   for (const reference of references) {
-    if (
-      !isObject(reference) ||
-      typeof reference['name'] !== 'string' ||
-      !REFERENCE_NAME.test(reference['name'])
-    ) {
+    if (!isObject(reference) || reference['name'] !== identifier.text) {
       continue;
     }
-    if (reference['start'] !== undefined || reference['end'] !== undefined) {
-      if (!Number.isInteger(reference['start']) || !Number.isInteger(reference['end'])) {
-        continue;
-      }
-      const start = reference['start'] as number;
-      const end = reference['end'] as number;
-      // Match the full identifier span to exclude partial names and text inside string literals.
-      if (
-        start !== identifier.start ||
-        end !== identifier.end ||
-        reference['name'] !== identifier.text ||
-        text.slice(start, end) !== reference['name']
-      ) {
-        continue;
-      }
-    } else if (reference['name'] !== identifier.text || text.trim() !== identifier.text) {
-      // A reference without offsets must name the entire type string.
+    const hasOffsets = reference['start'] !== undefined || reference['end'] !== undefined;
+    if (
+      hasOffsets
+        ? reference['start'] !== identifier.start || reference['end'] !== identifier.end
+        : text.trim() !== identifier.text
+    ) {
       continue;
     }
     if (reference['package'] === 'global:') {
@@ -401,7 +354,7 @@ function isBarePackageSpecifier(specifier: string): boolean {
 
 function isPackageNameSegment(segment: string): boolean {
   return (
-    PACKAGE_NAME_CHARACTERS.test(segment) &&
+    /^[A-Za-z0-9._-]+$/.test(segment) &&
     !segment.startsWith('.') &&
     !segment.startsWith('_') &&
     !segment.endsWith('.') &&
@@ -414,36 +367,4 @@ function packageModuleSpecifier(packageName: string, modulePath: string): string
   return normalizedModulePath === packageName || normalizedModulePath.startsWith(`${packageName}/`)
     ? normalizedModulePath
     : `${packageName}/${normalizedModulePath}`;
-}
-
-/** Checks that the allowed text parses as exactly one TypeScript type. */
-function isSyntacticallyValidType(typeText: string): boolean {
-  const source = parseTypeText(typeText);
-  let hasEmptyTypeArgumentList = false;
-  let hasQualifiedTypeName = false;
-  const visit = (node: ts.Node): void => {
-    if (ts.isQualifiedName(node)) {
-      hasQualifiedTypeName = true;
-      return;
-    }
-    if (ts.isTypeReferenceNode(node)) {
-      if (node.typeArguments?.length === 0) {
-        hasEmptyTypeArgumentList = true;
-        return;
-      }
-    }
-    ts.forEachChild(node, visit);
-  };
-  visit(source);
-  return !hasEmptyTypeArgumentList && !hasQualifiedTypeName && hasExactlyOneTypeAlias(source);
-}
-
-function hasExactlyOneTypeAlias(source: ts.SourceFile): boolean {
-  const parseDiagnostics = (source as ts.SourceFile & {parseDiagnostics?: readonly ts.Diagnostic[]})
-    .parseDiagnostics;
-  return (
-    (parseDiagnostics === undefined || parseDiagnostics.length === 0) &&
-    source.statements.length === 1 &&
-    ts.isTypeAliasDeclaration(source.statements[0])
-  );
 }

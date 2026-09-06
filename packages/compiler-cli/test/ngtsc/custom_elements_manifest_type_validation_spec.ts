@@ -10,6 +10,12 @@ import {ErrorCode, ngErrorCode} from '../../src/ngtsc/diagnostics';
 import {runInEachFileSystem} from '../../src/ngtsc/file_system/testing';
 import {loadStandardTestFiles} from '../../src/ngtsc/testing';
 import {NgtscTestEnvironment} from './env';
+import {
+  createDefinitionExport,
+  createManifest,
+  createManifestElement,
+  createManifestModule,
+} from '../../src/ngtsc/custom_elements_manifest/testing';
 
 const testFiles = loadStandardTestFiles({fakeCommon: true});
 
@@ -39,36 +45,26 @@ runInEachFileSystem(() => {
       };
       env.write(
         'custom-elements.json',
-        JSON.stringify({
-          schemaVersion: '2.0.0',
-          modules: [
-            {
-              kind: 'javascript-module',
-              path: 'element.js',
-              declarations: [
-                {
-                  kind: 'class',
-                  name: 'TestElement',
-                  customElement: true,
-                  tagName: 'test-element',
-                  members: [
-                    {kind: 'field', name: 'value', type},
-                    {kind: 'field', name: 'count', type: {text: 'number'}},
-                  ],
-                  attributes: [{name: 'value', type}],
-                  events: [{name: 'change', type}],
-                },
-              ],
-              exports: [
-                {
-                  kind: 'custom-element-definition',
-                  name: 'test-element',
-                  declaration: {name: 'TestElement'},
-                },
-              ],
-            },
-          ],
-        }),
+        JSON.stringify(
+          createManifest(
+            [
+              createManifestModule('element.js', {
+                declarations: [
+                  createManifestElement('TestElement', 'test-element', {
+                    members: [
+                      {kind: 'field', name: 'value', type},
+                      {kind: 'field', name: 'count', type: {text: 'number'}},
+                    ],
+                    attributes: [{name: 'value', type}],
+                    events: [{name: 'change', type}],
+                  }),
+                ],
+                exports: [createDefinitionExport('test-element', 'TestElement')],
+              }),
+            ],
+            '2.0.0',
+          ),
+        ),
       );
     }
 

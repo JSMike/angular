@@ -8,57 +8,16 @@
 
 import {ParsedCustomElementSchema} from '../src/schema';
 import {ParsedCustomElementsManifest, parseCustomElementsManifest} from '../src/manifest_parser';
-import {isObject} from '../src/type_text';
+import {
+  createDefinitionExport,
+  createManifest,
+  createManifestElement,
+  createManifestModule,
+  createCustomElementModule,
+} from '../testing';
 
 function parse(manifest: unknown): ParsedCustomElementsManifest {
-  return parseCustomElementsManifest(
-    JSON.stringify(withRequiredDefinitionExports(manifest)),
-    `'/custom-elements.json'`,
-  );
-}
-
-/**
- * Adds definition exports to fixtures that test other parser behavior. Tests for invalid
- * declaration/export relationships call `parseCustomElementsManifest` directly.
- */
-function withRequiredDefinitionExports(manifest: unknown): unknown {
-  if (!isObject(manifest) || !Array.isArray(manifest['modules'])) {
-    return manifest;
-  }
-  for (const module of manifest['modules']) {
-    if (!isObject(module) || !Array.isArray(module['declarations'])) {
-      continue;
-    }
-    const exports = Array.isArray(module['exports']) ? module['exports'] : [];
-    module['exports'] = exports;
-    for (const declaration of module['declarations']) {
-      if (
-        !isObject(declaration) ||
-        declaration['customElement'] !== true ||
-        typeof declaration['name'] !== 'string' ||
-        typeof declaration['tagName'] !== 'string'
-      ) {
-        continue;
-      }
-      const hasDefinition = exports.some(
-        (entry) =>
-          isObject(entry) &&
-          entry['kind'] === 'custom-element-definition' &&
-          entry['name'] === declaration['tagName'] &&
-          isObject(entry['declaration']) &&
-          entry['declaration']['name'] === declaration['name'] &&
-          entry['declaration']['module'] === undefined,
-      );
-      if (!hasDefinition) {
-        exports.push({
-          kind: 'custom-element-definition',
-          name: declaration['tagName'],
-          declaration: {name: declaration['name']},
-        });
-      }
-    }
-  }
-  return manifest;
+  return parseCustomElementsManifest(JSON.stringify(manifest), `'/custom-elements.json'`);
 }
 
 function schemaFor(
@@ -103,18 +62,9 @@ describe('parseCustomElementsManifest', () => {
       const result = parse({
         schemaVersion,
         modules: [
-          {
-            kind: 'javascript-module',
-            path: 'known.js',
-            declarations: [
-              {
-                kind: 'class',
-                name: 'KnownElement',
-                customElement: true,
-                tagName: 'known-element',
-              },
-            ],
-          },
+          createCustomElementModule('known.js', [
+            createManifestElement('KnownElement', 'known-element'),
+          ]),
         ],
       });
 
@@ -132,54 +82,45 @@ describe('parseCustomElementsManifest', () => {
   });
 
   it('should extract elements with members, attributes and events', () => {
-    const result = parse({
-      schemaVersion: '1.0.0',
-      modules: [
-        {
-          kind: 'javascript-module',
-          path: 'my-button.js',
-          declarations: [
-            {
-              kind: 'class',
-              name: 'MyButton',
-              customElement: true,
-              tagName: 'my-button',
-              members: [
-                {kind: 'field', name: 'label', type: {text: 'string'}},
-                {kind: 'field', name: 'disabled', type: {text: 'boolean'}},
-                {kind: 'field', name: 'count', type: {text: 'number'}},
-                {kind: 'field', name: 'variant', type: {text: "'primary' | 'secondary'"}},
-                {kind: 'field', name: 'items', type: {text: 'MyItem[]'}},
-                {kind: 'field', name: 'untyped'},
-                {kind: 'method', name: 'focusButton'},
-                {kind: 'field', name: 'internalState', privacy: 'private'},
-                {kind: 'field', name: 'protectedState', privacy: 'protected'},
-                {kind: 'field', name: 'defaultVariant', static: true},
-                // Accept readonly in v1 manifests for compatibility with existing producers.
-                {kind: 'field', name: 'validity', type: {text: 'object'}, readonly: true},
-              ],
-              attributes: [
-                {name: 'label', fieldName: 'label'},
-                {name: 'data-context', type: {text: 'string'}},
-                // The readonly backing field excludes both names from property bindings.
-                {name: 'validity', fieldName: 'validity', type: {text: 'string'}},
-                // Keep the attribute and report its missing backing field.
-                {name: 'orphan', fieldName: 'missingField', type: {text: 'string'}},
-              ],
-              events: [
-                {
-                  name: 'itemselect',
-                  type: {
-                    text: 'CustomEvent<{value: string}>',
-                    references: [{name: 'CustomEvent', package: 'global:', start: 0, end: 11}],
-                  },
+    const result = parse(
+      createManifest([
+        createCustomElementModule('my-button.js', [
+          createManifestElement('MyButton', 'my-button', {
+            members: [
+              {kind: 'field', name: 'label', type: {text: 'string'}},
+              {kind: 'field', name: 'disabled', type: {text: 'boolean'}},
+              {kind: 'field', name: 'count', type: {text: 'number'}},
+              {kind: 'field', name: 'variant', type: {text: "'primary' | 'secondary'"}},
+              {kind: 'field', name: 'items', type: {text: 'MyItem[]'}},
+              {kind: 'field', name: 'untyped'},
+              {kind: 'method', name: 'focusButton'},
+              {kind: 'field', name: 'internalState', privacy: 'private'},
+              {kind: 'field', name: 'protectedState', privacy: 'protected'},
+              {kind: 'field', name: 'defaultVariant', static: true},
+              // Accept readonly in v1 manifests for compatibility with existing producers.
+              {kind: 'field', name: 'validity', type: {text: 'object'}, readonly: true},
+            ],
+            attributes: [
+              {name: 'label', fieldName: 'label'},
+              {name: 'data-context', type: {text: 'string'}},
+              // The readonly backing field excludes both names from property bindings.
+              {name: 'validity', fieldName: 'validity', type: {text: 'string'}},
+              // Keep the attribute and report its missing backing field.
+              {name: 'orphan', fieldName: 'missingField', type: {text: 'string'}},
+            ],
+            events: [
+              {
+                name: 'itemselect',
+                type: {
+                  text: 'CustomEvent<{value: string}>',
+                  references: [{name: 'CustomEvent', package: 'global:', start: 0, end: 11}],
                 },
-              ],
-            },
-          ],
-        },
-      ],
-    });
+              },
+            ],
+          }),
+        ]),
+      ]),
+    );
 
     expect(result.errors).toEqual([]);
     const schema = schemaFor(result, 'my-button')!;
@@ -241,38 +182,29 @@ describe('parseCustomElementsManifest', () => {
   });
 
   it('should extract documentation and deprecation metadata', () => {
-    const result = parse({
-      schemaVersion: '1.0.0',
-      modules: [
-        {
-          kind: 'javascript-module',
-          path: 'my-doc.js',
-          declarations: [
-            {
-              kind: 'class',
-              name: 'MyDoc',
-              customElement: true,
-              tagName: 'my-doc',
-              summary: 'Short summary.',
-              description: 'A documented element.',
-              deprecated: true,
-              members: [
-                {
-                  kind: 'field',
-                  name: 'value',
-                  type: {text: 'string'},
-                  summary: 'Summary only.',
-                  deprecated: 'Use newValue instead.',
-                  default: 'initial',
-                },
-                {kind: 'field', name: 'plain', type: {text: 'string'}, deprecated: false},
-              ],
-              events: [{name: 'commit', description: 'Fired on commit.'}],
-            },
-          ],
-        },
-      ],
-    });
+    const result = parse(
+      createManifest([
+        createCustomElementModule('my-doc.js', [
+          createManifestElement('MyDoc', 'my-doc', {
+            summary: 'Short summary.',
+            description: 'A documented element.',
+            deprecated: true,
+            members: [
+              {
+                kind: 'field',
+                name: 'value',
+                type: {text: 'string'},
+                summary: 'Summary only.',
+                deprecated: 'Use newValue instead.',
+                default: 'initial',
+              },
+              {kind: 'field', name: 'plain', type: {text: 'string'}, deprecated: false},
+            ],
+            events: [{name: 'commit', description: 'Fired on commit.'}],
+          }),
+        ]),
+      ]),
+    );
 
     expect(result.errors).toEqual([]);
     const schema = schemaFor(result, 'my-doc')!;
@@ -291,12 +223,9 @@ describe('parseCustomElementsManifest', () => {
   });
 
   it('should resolve tag names from custom-element-definition exports', () => {
-    const result = parse({
-      schemaVersion: '1.0.0',
-      modules: [
-        {
-          kind: 'javascript-module',
-          path: 'my-card.js',
+    const result = parse(
+      createManifest([
+        createManifestModule('my-card.js', {
           declarations: [
             {
               kind: 'class',
@@ -305,10 +234,9 @@ describe('parseCustomElementsManifest', () => {
               members: [{kind: 'field', name: 'elevated', type: {text: 'boolean'}}],
             },
           ],
-        },
-        {
-          kind: 'javascript-module',
-          path: 'define.js',
+          exports: [],
+        }),
+        createManifestModule('define.js', {
           exports: [
             {
               kind: 'custom-element-definition',
@@ -316,9 +244,9 @@ describe('parseCustomElementsManifest', () => {
               declaration: {name: 'MyCard', module: 'my-card.js'},
             },
           ],
-        },
-      ],
-    });
+        }),
+      ]),
+    );
 
     expect(result.errors).toEqual([]);
     expect(result.warnings).toEqual([]);
@@ -330,20 +258,10 @@ describe('parseCustomElementsManifest', () => {
   });
 
   it('should let one home-module definition refine a tagName seed without a warning', () => {
-    const result = parse({
-      schemaVersion: '1.0.0',
-      modules: [
-        {
-          kind: 'javascript-module',
-          path: 'my-card.js',
-          declarations: [
-            {
-              kind: 'class',
-              name: 'MyCard',
-              customElement: true,
-              tagName: 'my-card',
-            },
-          ],
+    const result = parse(
+      createManifest([
+        createManifestModule('my-card.js', {
+          declarations: [createManifestElement('MyCard', 'my-card')],
           exports: [
             {
               kind: 'custom-element-definition',
@@ -352,9 +270,9 @@ describe('parseCustomElementsManifest', () => {
               deprecated: 'Use new-card.',
             },
           ],
-        },
-      ],
-    });
+        }),
+      ]),
+    );
 
     expect(result.warnings).toEqual([]);
     expect(result.schemas.map((schema) => schema.tagName)).toEqual(['my-card']);
@@ -363,12 +281,9 @@ describe('parseCustomElementsManifest', () => {
 
   it('should reject a second tag for the same declaration and retain the tagName seed', () => {
     const result = parseCustomElementsManifest(
-      JSON.stringify({
-        schemaVersion: '1.0.0',
-        modules: [
-          {
-            kind: 'javascript-module',
-            path: 'define-first.js',
+      JSON.stringify(
+        createManifest([
+          createManifestModule('define-first.js', {
             exports: [
               {
                 kind: 'custom-element-definition',
@@ -376,28 +291,13 @@ describe('parseCustomElementsManifest', () => {
                 declaration: {name: 'SharedElement', module: 'shared.js'},
               },
             ],
-          },
-          {
-            kind: 'javascript-module',
-            path: 'shared.js',
-            declarations: [
-              {
-                kind: 'class',
-                name: 'SharedElement',
-                customElement: true,
-                tagName: 'x-one',
-              },
-            ],
-            exports: [
-              {
-                kind: 'custom-element-definition',
-                name: 'x-one',
-                declaration: {name: 'SharedElement'},
-              },
-            ],
-          },
-        ],
-      }),
+          }),
+          createManifestModule('shared.js', {
+            declarations: [createManifestElement('SharedElement', 'x-one')],
+            exports: [createDefinitionExport('x-one', 'SharedElement')],
+          }),
+        ]),
+      ),
       `'/custom-elements.json'`,
     );
 
@@ -418,20 +318,10 @@ describe('parseCustomElementsManifest', () => {
 
   it('should report repeated definitions and retain the first definition metadata', () => {
     const result = parseCustomElementsManifest(
-      JSON.stringify({
-        schemaVersion: '1.0.0',
-        modules: [
-          {
-            kind: 'javascript-module',
-            path: 'shared.js',
-            declarations: [
-              {
-                kind: 'class',
-                name: 'SharedElement',
-                customElement: true,
-                tagName: 'x-one',
-              },
-            ],
+      JSON.stringify(
+        createManifest([
+          createManifestModule('shared.js', {
+            declarations: [createManifestElement('SharedElement', 'x-one')],
             exports: [
               {
                 kind: 'custom-element-definition',
@@ -440,10 +330,8 @@ describe('parseCustomElementsManifest', () => {
                 deprecated: 'First registration.',
               },
             ],
-          },
-          {
-            kind: 'javascript-module',
-            path: 'repeat.js',
+          }),
+          createManifestModule('repeat.js', {
             exports: [
               {
                 kind: 'custom-element-definition',
@@ -452,9 +340,9 @@ describe('parseCustomElementsManifest', () => {
                 deprecated: 'Second registration.',
               },
             ],
-          },
-        ],
-      }),
+          }),
+        ]),
+      ),
       `'/custom-elements.json'`,
     );
 
@@ -469,19 +357,14 @@ describe('parseCustomElementsManifest', () => {
   });
 
   it('should name both declarations when distinct declarations register the same tag', () => {
-    const result = parse({
-      schemaVersion: '1.0.0',
-      modules: [
-        {
-          kind: 'javascript-module',
-          path: 'elements.js',
-          declarations: [
-            {kind: 'class', name: 'FirstElement', customElement: true, tagName: 'shared-tag'},
-            {kind: 'class', name: 'SecondElement', customElement: true, tagName: 'shared-tag'},
-          ],
-        },
-      ],
-    });
+    const result = parse(
+      createManifest([
+        createCustomElementModule('elements.js', [
+          createManifestElement('FirstElement', 'shared-tag'),
+          createManifestElement('SecondElement', 'shared-tag'),
+        ]),
+      ]),
+    );
 
     expect(result.schemas.length).toBe(1);
     expect(result.warnings).toEqual([
@@ -493,12 +376,9 @@ describe('parseCustomElementsManifest', () => {
   });
 
   it('should emit a closed schema for a definition whose declaration is missing', () => {
-    const result = parse({
-      schemaVersion: '1.0.0',
-      modules: [
-        {
-          kind: 'javascript-module',
-          path: 'define.js',
+    const result = parse(
+      createManifest([
+        createManifestModule('define.js', {
           exports: [
             {
               kind: 'custom-element-definition',
@@ -506,9 +386,9 @@ describe('parseCustomElementsManifest', () => {
               declaration: {name: 'GhostElement', module: 'ghost.js'},
             },
           ],
-        },
-      ],
-    });
+        }),
+      ]),
+    );
 
     expect(result.errors).toEqual([]);
     const schema = schemaFor(result, 'ghost-element')!;
@@ -524,12 +404,9 @@ describe('parseCustomElementsManifest', () => {
   });
 
   it('should emit a closed schema for a definition declared in another package', () => {
-    const result = parse({
-      schemaVersion: '1.0.0',
-      modules: [
-        {
-          kind: 'javascript-module',
-          path: 'define.js',
+    const result = parse(
+      createManifest([
+        createManifestModule('define.js', {
           exports: [
             {
               kind: 'custom-element-definition',
@@ -537,9 +414,9 @@ describe('parseCustomElementsManifest', () => {
               declaration: {name: 'RemoteElement', package: '@other/pkg', module: 'remote.js'},
             },
           ],
-        },
-      ],
-    });
+        }),
+      ]),
+    );
 
     expect(result.errors).toEqual([]);
     const schema = schemaFor(result, 'remote-element')!;
@@ -550,25 +427,14 @@ describe('parseCustomElementsManifest', () => {
   });
 
   it('should prefer a resolvable declaration of the same tag over a definition-only entry', () => {
-    const result = parse({
-      schemaVersion: '1.0.0',
-      modules: [
-        {
-          kind: 'javascript-module',
-          path: 'dual.js',
-          declarations: [
-            {
-              kind: 'class',
-              name: 'DualElement',
-              customElement: true,
-              tagName: 'dual-element',
-              members: [{kind: 'field', name: 'value', type: {text: 'string'}}],
-            },
-          ],
-        },
-        {
-          kind: 'javascript-module',
-          path: 'define.js',
+    const result = parse(
+      createManifest([
+        createCustomElementModule('dual.js', [
+          createManifestElement('DualElement', 'dual-element', {
+            members: [{kind: 'field', name: 'value', type: {text: 'string'}}],
+          }),
+        ]),
+        createManifestModule('define.js', {
           exports: [
             {
               kind: 'custom-element-definition',
@@ -576,9 +442,9 @@ describe('parseCustomElementsManifest', () => {
               declaration: {name: 'Missing', module: 'nope.js'},
             },
           ],
-        },
-      ],
-    });
+        }),
+      ]),
+    );
 
     expect(result.errors).toEqual([]);
     expect(result.warnings).toEqual([]);
@@ -588,12 +454,9 @@ describe('parseCustomElementsManifest', () => {
   });
 
   it('should report an invalid tag name on a definition-only export', () => {
-    const result = parse({
-      schemaVersion: '1.0.0',
-      modules: [
-        {
-          kind: 'javascript-module',
-          path: 'define.js',
+    const result = parse(
+      createManifest([
+        createManifestModule('define.js', {
           exports: [
             {
               kind: 'custom-element-definition',
@@ -601,9 +464,9 @@ describe('parseCustomElementsManifest', () => {
               declaration: {name: 'Missing', module: 'nope.js'},
             },
           ],
-        },
-      ],
-    });
+        }),
+      ]),
+    );
 
     expect(result.schemas).toEqual([]);
     expect(result.warnings.length).toBe(1);
@@ -612,12 +475,9 @@ describe('parseCustomElementsManifest', () => {
   });
 
   it('should use the module path when export references share a declaration name', () => {
-    const result = parse({
-      schemaVersion: '1.0.0',
-      modules: [
-        {
-          kind: 'javascript-module',
-          path: 'primary.js',
+    const result = parse(
+      createManifest([
+        createManifestModule('primary.js', {
           declarations: [
             {
               kind: 'class',
@@ -626,10 +486,9 @@ describe('parseCustomElementsManifest', () => {
               members: [{kind: 'field', name: 'primary', type: {text: 'boolean'}}],
             },
           ],
-        },
-        {
-          kind: 'javascript-module',
-          path: 'secondary.js',
+          exports: [],
+        }),
+        createManifestModule('secondary.js', {
           declarations: [
             {
               kind: 'class',
@@ -638,10 +497,9 @@ describe('parseCustomElementsManifest', () => {
               members: [{kind: 'field', name: 'secondary', type: {text: 'boolean'}}],
             },
           ],
-        },
-        {
-          kind: 'javascript-module',
-          path: 'define.js',
+          exports: [],
+        }),
+        createManifestModule('define.js', {
           exports: [
             {
               kind: 'custom-element-definition',
@@ -649,9 +507,9 @@ describe('parseCustomElementsManifest', () => {
               declaration: {name: 'Button', module: './primary.js'},
             },
           ],
-        },
-      ],
-    });
+        }),
+      ]),
+    );
 
     expect(result.schemas.length).toBe(1);
     expect(result.schemas[0].tagName).toBe('primary-button');
@@ -659,46 +517,41 @@ describe('parseCustomElementsManifest', () => {
   });
 
   it('should skip custom element declarations without a tag name', () => {
-    const result = parse({
-      schemaVersion: '1.0.0',
-      modules: [
-        {
-          kind: 'javascript-module',
-          path: 'base.js',
+    const result = parse(
+      createManifest([
+        createManifestModule('base.js', {
           declarations: [{kind: 'class', name: 'MyBase', customElement: true}],
-        },
-      ],
-    });
+          exports: [],
+        }),
+      ]),
+    );
     expect(result.errors).toEqual([]);
     expect(result.schemas).toEqual([]);
   });
 
   it('should skip declarations that are not custom elements and tolerate unknown shapes', () => {
-    const result = parse({
-      schemaVersion: '2.1.0',
-      modules: [
-        'garbage',
-        {kind: 'javascript-module', path: 'util.js'},
-        {
-          kind: 'javascript-module',
-          path: 'mixed.js',
-          declarations: [
-            {kind: 'class', name: 'NotAnElement'},
-            {kind: 'function', name: 'helper'},
-            42,
-            {
-              kind: 'class',
-              name: 'MyChip',
-              customElement: true,
-              tagName: 'my-chip',
-              members: 'unexpected',
-              attributes: [null],
-              events: [{noName: true}],
-            },
-          ],
-        },
-      ],
-    });
+    const result = parse(
+      createManifest(
+        [
+          'garbage',
+          createManifestModule('util.js', {}),
+          createManifestModule('mixed.js', {
+            declarations: [
+              {kind: 'class', name: 'NotAnElement'},
+              {kind: 'function', name: 'helper'},
+              42,
+              createManifestElement('MyChip', 'my-chip', {
+                members: 'unexpected',
+                attributes: [null],
+                events: [{noName: true}],
+              }),
+            ],
+            exports: [createDefinitionExport('my-chip', 'MyChip')],
+          }),
+        ],
+        '2.1.0',
+      ),
+    );
 
     expect(result.errors).toEqual([]);
     expect(result.schemas.length).toBe(1);
@@ -709,41 +562,18 @@ describe('parseCustomElementsManifest', () => {
 
   it('should report invalid modules while retaining unrelated valid modules', () => {
     const result = parseCustomElementsManifest(
-      JSON.stringify({
-        schemaVersion: '1.0.0',
-        modules: [
+      JSON.stringify(
+        createManifest([
           {
             path: 'missing-kind.js',
-            declarations: [
-              {
-                kind: 'class',
-                name: 'IgnoredElement',
-                customElement: true,
-                tagName: 'ignored-element',
-              },
-            ],
+            declarations: [createManifestElement('IgnoredElement', 'ignored-element')],
           },
-          {
-            kind: 'javascript-module',
-            path: 'valid.js',
-            declarations: [
-              {
-                kind: 'class',
-                name: 'ValidElement',
-                customElement: true,
-                tagName: 'valid-element',
-              },
-            ],
-            exports: [
-              {
-                kind: 'custom-element-definition',
-                name: 'valid-element',
-                declaration: {name: 'ValidElement'},
-              },
-            ],
-          },
-        ],
-      }),
+          createManifestModule('valid.js', {
+            declarations: [createManifestElement('ValidElement', 'valid-element')],
+            exports: [createDefinitionExport('valid-element', 'ValidElement')],
+          }),
+        ]),
+      ),
       '/custom-elements.json',
     );
 
@@ -758,18 +588,11 @@ describe('parseCustomElementsManifest', () => {
   });
 
   it('should fail closed on malformed consumed field metadata and relationships', () => {
-    const result = parse({
-      schemaVersion: '2.1.0',
-      modules: [
-        {
-          kind: 'javascript-module',
-          path: 'strict.js',
-          declarations: [
-            {
-              kind: 'class',
-              name: 'StrictElement',
-              customElement: true,
-              tagName: 'strict-element',
+    const result = parse(
+      createManifest(
+        [
+          createCustomElementModule('strict.js', [
+            createManifestElement('StrictElement', 'strict-element', {
               members: [
                 {kind: 'field', name: 'badPrivacy', privacy: 'internal', type: {text: 'string'}},
                 {kind: 'field', name: 'badStatic', static: 'true', type: {text: 'string'}},
@@ -801,11 +624,12 @@ describe('parseCustomElementsManifest', () => {
                 {name: 'actual', fieldName: 'missing'},
                 {name: 'valid', fieldName: 'valid'},
               ],
-            },
-          ],
-        },
-      ],
-    });
+            }),
+          ]),
+        ],
+        '2.1.0',
+      ),
+    );
 
     const schema = schemaFor(result, 'strict-element')!;
     expect(schema.properties.map((property) => property.name)).toEqual([
@@ -841,12 +665,9 @@ describe('parseCustomElementsManifest', () => {
   it('should parse schema v2 manifests, including their v2-only fields', () => {
     // `readonly` on class fields, `deprecated` on attributes and events, and custom-element mixin
     // declarations only exist in schema v2.
-    const manifest = {
-      schemaVersion: '2.1.0',
-      modules: [
-        {
-          kind: 'javascript-module',
-          path: 'chip.js',
+    const manifest = createManifest(
+      [
+        createManifestModule('chip.js', {
           declarations: [
             {
               kind: 'mixin',
@@ -854,11 +675,7 @@ describe('parseCustomElementsManifest', () => {
               customElement: true,
               members: [{kind: 'field', name: 'disabled', type: {text: 'boolean'}}],
             },
-            {
-              kind: 'class',
-              name: 'MyChip',
-              customElement: true,
-              tagName: 'my-chip',
+            createManifestElement('MyChip', 'my-chip', {
               members: [
                 {kind: 'field', name: 'label', type: {text: 'string'}},
                 {kind: 'field', name: 'selected', type: {text: 'boolean'}, readonly: true},
@@ -874,11 +691,13 @@ describe('parseCustomElementsManifest', () => {
                   deprecated: true,
                 },
               ],
-            },
+            }),
           ],
-        },
+          exports: [createDefinitionExport('my-chip', 'MyChip')],
+        }),
       ],
-    };
+      '2.1.0',
+    );
     const result = parse(manifest);
 
     expect(result.errors).toEqual([]);
@@ -898,34 +717,25 @@ describe('parseCustomElementsManifest', () => {
   });
 
   it('should compute check types for trustworthy type text', () => {
-    const result = parse({
-      schemaVersion: '1.0.0',
-      modules: [
-        {
-          kind: 'javascript-module',
-          path: 'a.js',
-          declarations: [
-            {
-              kind: 'class',
-              name: 'MyButton',
-              customElement: true,
-              tagName: 'my-button',
-              members: [
-                {kind: 'field', name: 'count', type: {text: 'number'}},
-                {kind: 'field', name: 'variant', type: {text: "'primary' | 'secondary'"}},
-                {kind: 'field', name: 'items', type: {text: 'MyItem[]'}},
-                {kind: 'field', name: 'mixed', type: {text: 'boolean | number'}},
-                {kind: 'field', name: 'untyped'},
-              ],
-              attributes: [
-                {name: 'data-mode', type: {text: "'on' | 'off'"}},
-                {name: 'mixed', fieldName: 'mixed', type: {text: 'boolean | number'}},
-              ],
-            },
-          ],
-        },
-      ],
-    });
+    const result = parse(
+      createManifest([
+        createCustomElementModule('a.js', [
+          createManifestElement('MyButton', 'my-button', {
+            members: [
+              {kind: 'field', name: 'count', type: {text: 'number'}},
+              {kind: 'field', name: 'variant', type: {text: "'primary' | 'secondary'"}},
+              {kind: 'field', name: 'items', type: {text: 'MyItem[]'}},
+              {kind: 'field', name: 'mixed', type: {text: 'boolean | number'}},
+              {kind: 'field', name: 'untyped'},
+            ],
+            attributes: [
+              {name: 'data-mode', type: {text: "'on' | 'off'"}},
+              {name: 'mixed', fieldName: 'mixed', type: {text: 'boolean | number'}},
+            ],
+          }),
+        ]),
+      ]),
+    );
 
     const properties = new Map(schemaFor(result, 'my-button')!.properties.map((p) => [p.name, p]));
     expect(properties.get('count')!.checkType?.checkType).toBe('number');
@@ -958,63 +768,54 @@ describe('parseCustomElementsManifest', () => {
   });
 
   it('should treat an explicit attribute type as authoritative', () => {
-    const result = parse({
-      schemaVersion: '1.0.0',
-      modules: [
-        {
-          kind: 'javascript-module',
-          path: 'a.js',
-          declarations: [
-            {
-              kind: 'class',
-              name: 'MyButton',
-              customElement: true,
-              tagName: 'my-button',
-              members: [
-                {
-                  kind: 'field',
-                  name: 'variant',
-                  attribute: 'variant',
-                  type: {text: "'primary' | 'secondary'"},
-                },
-                {
-                  kind: 'field',
-                  name: 'size',
-                  attribute: 'size',
-                  type: {text: 'UnresolvedMemberType'},
-                },
-                {
-                  kind: 'field',
-                  name: 'state',
-                  attribute: 'state',
-                  type: {text: "'on' | 'off'"},
-                },
-                {
-                  kind: 'field',
-                  name: 'mode',
-                  attribute: 'mode',
-                  type: {text: "'light' | 'dark'"},
-                },
-              ],
-              attributes: [
-                {
-                  name: 'variant',
-                  fieldName: 'variant',
-                  type: {text: 'UnresolvedAttributeType'},
-                },
-                {
-                  name: 'size',
-                  fieldName: 'size',
-                  type: {text: "'small' | 'large'"},
-                },
-                {name: 'state', fieldName: 'state'},
-                {name: 'mode', fieldName: 'mode', type: true},
-              ],
-            },
-          ],
-        },
-      ],
-    });
+    const result = parse(
+      createManifest([
+        createCustomElementModule('a.js', [
+          createManifestElement('MyButton', 'my-button', {
+            members: [
+              {
+                kind: 'field',
+                name: 'variant',
+                attribute: 'variant',
+                type: {text: "'primary' | 'secondary'"},
+              },
+              {
+                kind: 'field',
+                name: 'size',
+                attribute: 'size',
+                type: {text: 'UnresolvedMemberType'},
+              },
+              {
+                kind: 'field',
+                name: 'state',
+                attribute: 'state',
+                type: {text: "'on' | 'off'"},
+              },
+              {
+                kind: 'field',
+                name: 'mode',
+                attribute: 'mode',
+                type: {text: "'light' | 'dark'"},
+              },
+            ],
+            attributes: [
+              {
+                name: 'variant',
+                fieldName: 'variant',
+                type: {text: 'UnresolvedAttributeType'},
+              },
+              {
+                name: 'size',
+                fieldName: 'size',
+                type: {text: "'small' | 'large'"},
+              },
+              {name: 'state', fieldName: 'state'},
+              {name: 'mode', fieldName: 'mode', type: true},
+            ],
+          }),
+        ]),
+      ]),
+    );
 
     const schema = schemaFor(result, 'my-button')!;
     const properties = new Map(schema.properties.map((property) => [property.name, property]));
@@ -1051,18 +852,11 @@ describe('parseCustomElementsManifest', () => {
 
   it('should compute referenced check types using the owning package', () => {
     const result = parseCustomElementsManifest(
-      JSON.stringify({
-        schemaVersion: '1.0.0',
-        modules: [
-          {
-            kind: 'javascript-module',
-            path: 'a.js',
+      JSON.stringify(
+        createManifest([
+          createManifestModule('a.js', {
             declarations: [
-              {
-                kind: 'class',
-                name: 'MyList',
-                customElement: true,
-                tagName: 'my-list',
+              createManifestElement('MyList', 'my-list', {
                 members: [
                   {
                     kind: 'field',
@@ -1073,18 +867,12 @@ describe('parseCustomElementsManifest', () => {
                     },
                   },
                 ],
-              },
+              }),
             ],
-            exports: [
-              {
-                kind: 'custom-element-definition',
-                name: 'my-list',
-                declaration: {name: 'MyList'},
-              },
-            ],
-          },
-        ],
-      }),
+            exports: [createDefinitionExport('my-list', 'MyList')],
+          }),
+        ]),
+      ),
       '/custom-elements.json',
       '@my/elements',
     );
@@ -1094,18 +882,11 @@ describe('parseCustomElementsManifest', () => {
   });
 
   it('should report unusable member and event types', () => {
-    const result = parse({
-      schemaVersion: '1.0.0',
-      modules: [
-        {
-          kind: 'javascript-module',
-          path: 'element.js',
+    const result = parse(
+      createManifest([
+        createManifestModule('element.js', {
           declarations: [
-            {
-              kind: 'class',
-              name: 'MyElement',
-              customElement: true,
-              tagName: 'my-element',
+            createManifestElement('MyElement', 'my-element', {
               members: [
                 {
                   kind: 'field',
@@ -1114,18 +895,12 @@ describe('parseCustomElementsManifest', () => {
                 },
               ],
               events: [{name: 'change', type: {text: '(value: string) => void'}}],
-            },
+            }),
           ],
-          exports: [
-            {
-              kind: 'custom-element-definition',
-              name: 'my-element',
-              declaration: {name: 'MyElement'},
-            },
-          ],
-        },
-      ],
-    });
+          exports: [createDefinitionExport('my-element', 'MyElement')],
+        }),
+      ]),
+    );
 
     expect(result.schemas[0].properties[0].checkType?.checkType).toBeUndefined();
     expect(result.schemas[0].events[0].checkType?.checkType).toBeUndefined();
@@ -1138,31 +913,13 @@ describe('parseCustomElementsManifest', () => {
 
   it('should report an ambiguous JavaScript export mapping for an element instance type', () => {
     const result = parseCustomElementsManifest(
-      JSON.stringify({
-        schemaVersion: '1.0.0',
-        modules: [
-          {
-            kind: 'javascript-module',
-            path: 'internal/element.js',
-            declarations: [
-              {
-                kind: 'class',
-                name: 'MyElement',
-                customElement: true,
-                tagName: 'my-element',
-              },
-            ],
-            exports: [
-              {
-                kind: 'custom-element-definition',
-                name: 'my-element',
-                declaration: {name: 'MyElement'},
-              },
-            ],
-          },
-          {
-            kind: 'javascript-module',
-            path: 'index.js',
+      JSON.stringify(
+        createManifest([
+          createManifestModule('internal/element.js', {
+            declarations: [createManifestElement('MyElement', 'my-element')],
+            exports: [createDefinitionExport('my-element', 'MyElement')],
+          }),
+          createManifestModule('index.js', {
             exports: [
               {
                 kind: 'js',
@@ -1175,9 +932,9 @@ describe('parseCustomElementsManifest', () => {
                 declaration: {name: 'MyElement', module: 'internal/element.js'},
               },
             ],
-          },
-        ],
-      }),
+          }),
+        ]),
+      ),
       '/custom-elements.json',
       '@my/elements',
     );
@@ -1195,31 +952,13 @@ describe('parseCustomElementsManifest', () => {
 
   it('should use a public re-export module for the element instance type', () => {
     const result = parseCustomElementsManifest(
-      JSON.stringify({
-        schemaVersion: '1.0.0',
-        modules: [
-          {
-            kind: 'javascript-module',
-            path: 'internal/button.js',
-            declarations: [
-              {
-                kind: 'class',
-                name: 'MyButton',
-                customElement: true,
-                tagName: 'my-button',
-              },
-            ],
-            exports: [
-              {
-                kind: 'custom-element-definition',
-                name: 'my-button',
-                declaration: {name: 'MyButton'},
-              },
-            ],
-          },
-          {
-            kind: 'javascript-module',
-            path: 'index.js',
+      JSON.stringify(
+        createManifest([
+          createManifestModule('internal/button.js', {
+            declarations: [createManifestElement('MyButton', 'my-button')],
+            exports: [createDefinitionExport('my-button', 'MyButton')],
+          }),
+          createManifestModule('index.js', {
             exports: [
               {
                 kind: 'js',
@@ -1227,9 +966,9 @@ describe('parseCustomElementsManifest', () => {
                 declaration: {name: 'MyButton', module: 'internal/button.js'},
               },
             ],
-          },
-        ],
-      }),
+          }),
+        ]),
+      ),
       '/custom-elements.json',
       '@my/elements',
     );
@@ -1242,36 +981,20 @@ describe('parseCustomElementsManifest', () => {
   it("should prefer the declaration's home module for a barrel re-exported element instance type", () => {
     // Both the declaration's module and a barrel export the class by name. Select its own module.
     const result = parseCustomElementsManifest(
-      JSON.stringify({
-        schemaVersion: '1.0.0',
-        modules: [
-          {
-            kind: 'javascript-module',
-            path: 'accordion/accordion-header.js',
-            declarations: [
-              {
-                kind: 'class',
-                name: 'MyAccordionHeader',
-                customElement: true,
-                tagName: 'my-accordion-header',
-              },
-            ],
+      JSON.stringify(
+        createManifest([
+          createManifestModule('accordion/accordion-header.js', {
+            declarations: [createManifestElement('MyAccordionHeader', 'my-accordion-header')],
             exports: [
-              {
-                kind: 'custom-element-definition',
-                name: 'my-accordion-header',
-                declaration: {name: 'MyAccordionHeader'},
-              },
+              createDefinitionExport('my-accordion-header', 'MyAccordionHeader'),
               {
                 kind: 'js',
                 name: 'MyAccordionHeader',
                 declaration: {name: 'MyAccordionHeader', module: 'accordion/accordion-header.js'},
               },
             ],
-          },
-          {
-            kind: 'javascript-module',
-            path: 'accordion/accordion.js',
+          }),
+          createManifestModule('accordion/accordion.js', {
             exports: [
               {
                 kind: 'js',
@@ -1279,9 +1002,9 @@ describe('parseCustomElementsManifest', () => {
                 declaration: {name: 'MyAccordionHeader', module: 'accordion/accordion-header.js'},
               },
             ],
-          },
-        ],
-      }),
+          }),
+        ]),
+      ),
       '/custom-elements.json',
       '@my/elements',
     );
@@ -1294,31 +1017,13 @@ describe('parseCustomElementsManifest', () => {
 
   it('should still fail closed when exact-name exports all come from barrels, not the home module', () => {
     const result = parseCustomElementsManifest(
-      JSON.stringify({
-        schemaVersion: '1.0.0',
-        modules: [
-          {
-            kind: 'javascript-module',
-            path: 'internal/element.js',
-            declarations: [
-              {
-                kind: 'class',
-                name: 'MyElement',
-                customElement: true,
-                tagName: 'my-element',
-              },
-            ],
-            exports: [
-              {
-                kind: 'custom-element-definition',
-                name: 'my-element',
-                declaration: {name: 'MyElement'},
-              },
-            ],
-          },
-          {
-            kind: 'javascript-module',
-            path: 'barrel-a.js',
+      JSON.stringify(
+        createManifest([
+          createManifestModule('internal/element.js', {
+            declarations: [createManifestElement('MyElement', 'my-element')],
+            exports: [createDefinitionExport('my-element', 'MyElement')],
+          }),
+          createManifestModule('barrel-a.js', {
             exports: [
               {
                 kind: 'js',
@@ -1326,10 +1031,8 @@ describe('parseCustomElementsManifest', () => {
                 declaration: {name: 'MyElement', module: 'internal/element.js'},
               },
             ],
-          },
-          {
-            kind: 'javascript-module',
-            path: 'barrel-b.js',
+          }),
+          createManifestModule('barrel-b.js', {
             exports: [
               {
                 kind: 'js',
@@ -1337,9 +1040,9 @@ describe('parseCustomElementsManifest', () => {
                 declaration: {name: 'MyElement', module: 'internal/element.js'},
               },
             ],
-          },
-        ],
-      }),
+          }),
+        ]),
+      ),
       '/custom-elements.json',
       '@my/elements',
     );
@@ -1357,18 +1060,11 @@ describe('parseCustomElementsManifest', () => {
 
   it('should use the exact module named by type.reference despite barrel re-exports', () => {
     const result = parseCustomElementsManifest(
-      JSON.stringify({
-        schemaVersion: '1.0.0',
-        modules: [
-          {
-            kind: 'javascript-module',
-            path: 'element.js',
+      JSON.stringify(
+        createManifest([
+          createManifestModule('element.js', {
             declarations: [
-              {
-                kind: 'class',
-                name: 'MyElement',
-                customElement: true,
-                tagName: 'my-element',
+              createManifestElement('MyElement', 'my-element', {
                 members: [
                   {
                     kind: 'field',
@@ -1379,19 +1075,11 @@ describe('parseCustomElementsManifest', () => {
                     },
                   },
                 ],
-              },
+              }),
             ],
-            exports: [
-              {
-                kind: 'custom-element-definition',
-                name: 'my-element',
-                declaration: {name: 'MyElement'},
-              },
-            ],
-          },
-          {
-            kind: 'javascript-module',
-            path: 'types/variant.js',
+            exports: [createDefinitionExport('my-element', 'MyElement')],
+          }),
+          createManifestModule('types/variant.js', {
             exports: [
               {
                 kind: 'js',
@@ -1399,10 +1087,8 @@ describe('parseCustomElementsManifest', () => {
                 declaration: {name: 'MyVariant', module: 'types/variant.js'},
               },
             ],
-          },
-          {
-            kind: 'javascript-module',
-            path: 'index.js',
+          }),
+          createManifestModule('index.js', {
             exports: [
               {
                 kind: 'js',
@@ -1410,9 +1096,9 @@ describe('parseCustomElementsManifest', () => {
                 declaration: {name: 'MyVariant', module: 'types/variant.js'},
               },
             ],
-          },
-        ],
-      }),
+          }),
+        ]),
+      ),
       '/custom-elements.json',
       '@my/elements',
     );
@@ -1427,40 +1113,27 @@ describe('parseCustomElementsManifest', () => {
   });
 
   it('should reject uppercase tag names instead of silently normalizing them', () => {
-    const result = parse({
-      schemaVersion: '1.0.0',
-      modules: [
-        {
-          kind: 'javascript-module',
-          path: 'a.js',
-          declarations: [
-            {
-              kind: 'class',
-              name: 'MyTabA',
-              customElement: true,
-              tagName: 'My-Tab',
-              members: [{kind: 'field', name: 'selected', type: {text: 'boolean'}}],
-            },
-            {
-              kind: 'class',
-              name: 'MyTabB',
-              customElement: true,
-              tagName: 'my-tab',
-              members: [{kind: 'field', name: 'label', type: {text: 'string'}}],
-              events: [
-                {
-                  name: 'tabchange',
-                  type: {
-                    text: 'Event',
-                    references: [{name: 'Event', package: 'global:', start: 0, end: 5}],
-                  },
+    const result = parse(
+      createManifest([
+        createCustomElementModule('a.js', [
+          createManifestElement('MyTabA', 'My-Tab', {
+            members: [{kind: 'field', name: 'selected', type: {text: 'boolean'}}],
+          }),
+          createManifestElement('MyTabB', 'my-tab', {
+            members: [{kind: 'field', name: 'label', type: {text: 'string'}}],
+            events: [
+              {
+                name: 'tabchange',
+                type: {
+                  text: 'Event',
+                  references: [{name: 'Event', package: 'global:', start: 0, end: 5}],
                 },
-              ],
-            },
-          ],
-        },
-      ],
-    });
+              },
+            ],
+          }),
+        ]),
+      ]),
+    );
 
     expect(result.errors).toEqual([]);
     expect(result.schemas.length).toBe(1);
@@ -1483,42 +1156,18 @@ describe('parseCustomElementsManifest', () => {
   });
 
   it('should skip declarations with invalid or native tag names', () => {
-    const result = parse({
-      schemaVersion: '1.0.0',
-      modules: [
-        {
-          kind: 'javascript-module',
-          path: 'a.js',
-          declarations: [
-            {
-              kind: 'class',
-              name: 'FancyMarquee',
-              customElement: true,
-              tagName: 'marquee',
-              members: [{kind: 'field', name: 'glitter', type: {text: 'boolean'}}],
-            },
-            {
-              kind: 'class',
-              name: 'ReservedName',
-              customElement: true,
-              tagName: 'font-face',
-            },
-            {
-              kind: 'class',
-              name: 'BadStart',
-              customElement: true,
-              tagName: '-leading-dash',
-            },
-            {
-              kind: 'class',
-              name: 'ValidElement',
-              customElement: true,
-              tagName: 'my-valid',
-            },
-          ],
-        },
-      ],
-    });
+    const result = parse(
+      createManifest([
+        createCustomElementModule('a.js', [
+          createManifestElement('FancyMarquee', 'marquee', {
+            members: [{kind: 'field', name: 'glitter', type: {text: 'boolean'}}],
+          }),
+          createManifestElement('ReservedName', 'font-face'),
+          createManifestElement('BadStart', '-leading-dash'),
+          createManifestElement('ValidElement', 'my-valid'),
+        ]),
+      ]),
+    );
 
     expect(result.errors).toEqual([]);
     expect(result.schemas.length).toBe(1);
@@ -1534,18 +1183,13 @@ describe('parseCustomElementsManifest', () => {
   });
 
   it('should accept non-ASCII PCENChars without changing their case', () => {
-    const result = parse({
-      schemaVersion: '1.0.0',
-      modules: [
-        {
-          kind: 'javascript-module',
-          path: 'element.js',
-          declarations: [
-            {kind: 'class', name: 'UnicodeElement', customElement: true, tagName: 'my-Élément'},
-          ],
-        },
-      ],
-    });
+    const result = parse(
+      createManifest([
+        createCustomElementModule('element.js', [
+          createManifestElement('UnicodeElement', 'my-Élément'),
+        ]),
+      ]),
+    );
 
     expect(result.warnings).toEqual([]);
     expect(result.schemas[0].tagName).toBe('my-Élément');
@@ -1553,18 +1197,11 @@ describe('parseCustomElementsManifest', () => {
 
   it('should resolve local type references against the containing module', () => {
     const result = parseCustomElementsManifest(
-      JSON.stringify({
-        schemaVersion: '1.0.0',
-        modules: [
-          {
-            kind: 'javascript-module',
-            path: 'element.js',
+      JSON.stringify(
+        createManifest([
+          createManifestModule('element.js', {
             declarations: [
-              {
-                kind: 'class',
-                name: 'MyElement',
-                customElement: true,
-                tagName: 'my-element',
+              createManifestElement('MyElement', 'my-element', {
                 members: [
                   {
                     kind: 'field',
@@ -1572,11 +1209,11 @@ describe('parseCustomElementsManifest', () => {
                     type: {text: 'LocalType', references: [{name: 'LocalType'}]},
                   },
                 ],
-              },
+              }),
             ],
-          },
-        ],
-      }),
+          }),
+        ]),
+      ),
       '/custom-elements.json',
       '@my/elements',
     );
@@ -1587,61 +1224,47 @@ describe('parseCustomElementsManifest', () => {
   });
 
   it('should support global type references', () => {
-    const result = parse({
-      schemaVersion: '1.0.0',
-      modules: [
-        {
-          kind: 'javascript-module',
-          path: 'element.js',
-          declarations: [
-            {
-              kind: 'class',
-              name: 'MyElement',
-              customElement: true,
-              tagName: 'my-element',
-              events: [
-                {
-                  name: 'keydown',
-                  type: {
-                    text: 'KeyboardEvent',
-                    references: [{name: 'KeyboardEvent', package: 'global:'}],
-                  },
+    const result = parse(
+      createManifest([
+        createCustomElementModule('element.js', [
+          createManifestElement('MyElement', 'my-element', {
+            events: [
+              {
+                name: 'keydown',
+                type: {
+                  text: 'KeyboardEvent',
+                  references: [{name: 'KeyboardEvent', package: 'global:'}],
                 },
-              ],
-            },
-          ],
-        },
-      ],
-    });
+              },
+            ],
+          }),
+        ]),
+      ]),
+    );
 
     expect(result.schemas[0].events[0].checkType?.checkType).toBe('KeyboardEvent');
   });
 
   it('should resolve a local custom-element-definition to a class without customElement metadata', () => {
-    const manifest = {
-      schemaVersion: '1.0.0',
-      modules: [
-        {
-          kind: 'javascript-module',
-          path: 'element.js',
-          declarations: [
-            {
-              kind: 'class',
-              name: 'MyElement',
-              members: [{kind: 'field', name: 'value', type: {text: 'string'}}],
-            },
-          ],
-          exports: [
-            {
-              kind: 'custom-element-definition',
-              name: 'my-element',
-              declaration: {name: 'MyElement'},
-              deprecated: 'Use new-element.',
-            },
-          ],
-        },
-      ],
-    };
+    const manifest = createManifest([
+      createManifestModule('element.js', {
+        declarations: [
+          {
+            kind: 'class',
+            name: 'MyElement',
+            members: [{kind: 'field', name: 'value', type: {text: 'string'}}],
+          },
+        ],
+        exports: [
+          {
+            kind: 'custom-element-definition',
+            name: 'my-element',
+            declaration: {name: 'MyElement'},
+            deprecated: 'Use new-element.',
+          },
+        ],
+      }),
+    ]);
     const result = parse(manifest);
 
     expect(result.schemas.length).toBe(1);

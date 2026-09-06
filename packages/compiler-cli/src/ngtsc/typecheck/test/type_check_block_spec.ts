@@ -1086,13 +1086,9 @@ describe('type check blocks', () => {
       expect(block).toContain('_t1 = ((1)!);');
     });
 
-    it('should check the input side of two-way bindings', () => {
+    it('should check both sides of two-way bindings when the change event is declared', () => {
       const block = tcb(`<my-button [(count)]="value"></my-button>`, undefined, CONFIG);
       expect(block).toContain('null! as (number)');
-    });
-
-    it('should type the event side of two-way bindings when the change event is declared', () => {
-      const block = tcb(`<my-button [(count)]="value"></my-button>`, undefined, CONFIG);
       expect(block).toContain('($event: (CustomEvent<number>))');
     });
 

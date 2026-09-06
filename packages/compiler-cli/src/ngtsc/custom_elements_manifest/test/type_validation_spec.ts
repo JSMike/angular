@@ -10,9 +10,23 @@ import ts from 'typescript';
 import {NgCompilerAdapter} from '../../core/api';
 import {absoluteFrom as _, getFileSystem, NgtscCompilerHost} from '../../file_system';
 import {runInEachFileSystem} from '../../file_system/testing';
-import {getTypeEnvironmentFiles, ManifestLoadContext} from '../src/load_context';
+import {ManifestResolver} from '../src/manifest_resolver';
 import {parseCustomElementsManifest} from '../src/manifest_parser';
-import {resolveManifestSchemas} from '../src/type_resolver';
+import {ManifestTypeChecker, ManifestTypeInput} from '../src/type_resolver';
+import {
+  createDefinitionExport,
+  createManifest,
+  createManifestElement,
+  createManifestModule,
+} from '../testing';
+
+function resolveManifestSchemas(
+  parsed: ReturnType<typeof parseCustomElementsManifest>,
+  input: Omit<ManifestTypeInput, 'schemas'>,
+  context: ManifestTypeChecker,
+) {
+  return context.resolve([{...input, schemas: parsed.schemas}], 'verbose')[0];
+}
 
 const OPTIONS: ts.CompilerOptions = {
   noLib: true,
@@ -46,7 +60,7 @@ runInEachFileSystem(() => {
       );
     });
 
-    function makeContext(): ManifestLoadContext {
+    function makeContext(): ManifestTypeChecker {
       const host = new NgtscCompilerHost(getFileSystem(), OPTIONS);
       const adapter: NgCompilerAdapter = {
         fileExists: host.fileExists.bind(host),
@@ -68,58 +82,31 @@ runInEachFileSystem(() => {
         options: OPTIONS,
         host,
       });
-      return {
-        environment: {
-          adapter,
-          program,
-          basePath: _('/project'),
-          options: OPTIONS,
-          moduleResolutionCache: null,
-          typeModuleResolutionCache: ts.createModuleResolutionCache(
-            '/project',
-            (name) => name,
-            OPTIONS,
-          ),
-          typeEnvironmentFiles: getTypeEnvironmentFiles(program, adapter),
-          programTypeEnvironment: {hasDefaultLibrary: false, isSolutionStyleRoot: false},
-        },
-        dependencies: {
-          manifestPaths: new Set(),
-          cacheDependencyPaths: new Set(),
-          globalTypeAvailability: new Map(),
-        },
-      };
+      return new ManifestTypeChecker(
+        new ManifestResolver(_('/project'), OPTIONS, adapter),
+        program,
+      );
     }
 
     function parseType(text: string, name: string, packageName: string) {
       const type = {text, references: [{name, package: packageName, start: 0, end: name.length}]};
       return parseCustomElementsManifest(
-        JSON.stringify({
-          schemaVersion: '2.0.0',
-          modules: [
-            {
-              kind: 'javascript-module',
-              path: 'element.js',
-              declarations: [
-                {
-                  kind: 'class',
-                  name: 'Element',
-                  customElement: true,
-                  tagName: 'my-element',
-                  members: [{kind: 'field', name: 'value', type}],
-                  attributes: [{name: 'value', type}],
-                },
-              ],
-              exports: [
-                {
-                  kind: 'custom-element-definition',
-                  name: 'my-element',
-                  declaration: {name: 'Element'},
-                },
-              ],
-            },
-          ],
-        }),
+        JSON.stringify(
+          createManifest(
+            [
+              createManifestModule('element.js', {
+                declarations: [
+                  createManifestElement('Element', 'my-element', {
+                    members: [{kind: 'field', name: 'value', type}],
+                    attributes: [{name: 'value', type}],
+                  }),
+                ],
+                exports: [createDefinitionExport('my-element', 'Element')],
+              }),
+            ],
+            '2.0.0',
+          ),
+        ),
         'manifest',
       );
     }
@@ -131,9 +118,80 @@ runInEachFileSystem(() => {
       diagnosticsMode: 'verbose' as const,
     });
 
+    it('should retain every diagnostic origin when validating repeated types together', () => {
+      const context = makeContext();
+      const types = ['Box<number>', 'Box<"valid">', 'Box<boolean>', 'Box<number>'];
+      const labels = ['first', 'valid', 'different', 'repeated'];
+      const parsed = types.map((text) => parseType(text, 'Box', 'types-library'));
+      const originalSchemas = parsed.map(({schemas}) => JSON.stringify(schemas));
+      const results = context.resolve(
+        labels.map((label, index) => ({
+          ...manifest(),
+          label,
+          schemas: parsed[index].schemas,
+        })),
+        'verbose',
+      );
+      expect(results.length).toBe(4);
+      for (const [index, result] of results.entries()) {
+        expect(JSON.stringify(parsed[index].schemas)).toBe(originalSchemas[index]);
+        if (index === 1) {
+          expect(result.warnings).toEqual([]);
+          expect(result.schemas[0].properties[0].checkType).toBe(
+            'import("types-library").Box<"valid">',
+          );
+          continue;
+        }
+        expect(result.warnings.length).toBe(2);
+        expect(
+          result.warnings.every((warning) => warning.message.includes(labels[index])),
+        ).toBeTrue();
+        expect(result.warnings[0].message).toContain(`declares type text "${types[index]}"`);
+        expect(result.schemas[0].properties[0].checkType).toBeUndefined();
+        expect(result.schemas[0].properties[0].typeText).toBe(types[index]);
+      }
+    });
+
+    it('should keep manifest-relative resolutions distinct when batching identical author types', () => {
+      const fs = getFileSystem();
+      fs.ensureDir(_('/project/node_modules/nested-library'));
+      fs.writeFile(
+        _('/project/node_modules/nested-library/package.json'),
+        JSON.stringify({
+          name: 'nested-library',
+          exports: {'./one': './one/types.d.ts', './two': './two/types.d.ts'},
+        }),
+      );
+      const context = makeContext();
+      const inputs = ['one', 'two'].map((name) => {
+        fs.ensureDir(_(`/project/node_modules/nested-library/${name}`));
+        fs.writeFile(
+          _(`/project/node_modules/nested-library/${name}/types.d.ts`),
+          `export type Choice = '${name}';`,
+        );
+        return {
+          ...manifest(),
+          schemas: parseType('Choice', 'Choice', 'nested-library').schemas,
+          path: _(`/project/node_modules/nested-library/${name}/custom-elements.json`),
+          packageName: 'nested-library',
+        };
+      });
+      const results = context.resolve(inputs, 'verbose');
+      for (const [index, result] of results.entries()) {
+        expect(result.diagnostics).toEqual([]);
+        expect(result.warnings).toEqual([]);
+        expect(result.schemas[0].attributes[0].stringLiteralValues).toEqual([
+          index === 0 ? 'one' : 'two',
+        ]);
+      }
+    });
+
     it('should reuse consumer sources across manifests on a non-caching host', () => {
       const context = makeContext();
-      const {adapter, program} = context.environment;
+      const {
+        sources: {adapter},
+        program,
+      } = context;
       const reads = spyOn(adapter, 'getSourceFile').and.callThrough();
       for (let index = 0; index < 2; index++) {
         const result = resolveManifestSchemas(
@@ -149,17 +207,6 @@ runInEachFileSystem(() => {
         .allArgs()
         .filter(([name]) => program.getSourceFile(name) !== undefined);
       expect(reparsedConsumerFiles).toEqual([]);
-    });
-
-    it('should return semantic warnings with author text without changing parsed warnings', () => {
-      const parsed = parseType('Box<number>', 'Box', 'types-library');
-      Object.freeze(parsed.warnings);
-      const result = resolveManifestSchemas(parsed, manifest(), makeContext());
-      expect(parsed.warnings).toEqual([]);
-      expect(result.warnings.length).toBe(2);
-      expect(result.warnings[0].message).toContain('declares type text "Box<number>"');
-      expect(result.schemas[0].properties[0].checkType).toBeUndefined();
-      expect(result.schemas[0].properties[0].typeText).toBe('Box<number>');
     });
 
     for (const [moduleType, choice] of [

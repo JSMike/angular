@@ -540,7 +540,7 @@ export class NgCompiler {
 
     this.customElementsManifests = getValidCustomElementsManifestsOption(this.options) ?? [];
     if (this.customElementsManifests.length > 0) {
-      this.loadCustomElementsManifestSchemas(moduleResolutionCache);
+      this.loadCustomElementsManifestSchemas();
     }
     this.cycleAnalyzer = new CycleAnalyzer(
       new ImportGraph(inputProgram.getTypeChecker(), this.delegatingPerfRecorder),
@@ -575,15 +575,12 @@ export class NgCompiler {
    * file because manifest changes affect all templates. Build hosts use these paths for watches
    * and incremental invalidation.
    */
-  private loadCustomElementsManifestSchemas(
-    moduleResolutionCache: ts.ModuleResolutionCache | null,
-  ): void {
+  private loadCustomElementsManifestSchemas(): void {
     const manifestResult = loadCustomElementsManifests(
       this.customElementsManifests,
       resolve(this.options['basePath'] ?? this.adapter.getCurrentDirectory()),
       this.options,
       this.adapter,
-      moduleResolutionCache,
       this.inputProgram,
       getCustomElementsManifestsDiagnosticsMode(this.options),
       this.adapter.customElementsManifestCache ?? null,
@@ -619,7 +616,7 @@ export class NgCompiler {
       if (manifestChanged) {
         // Reload schemas and invalidate component TCBs. Keep the compilation because a resource
         // update cannot recreate its finalized semantic dependency graph.
-        this.loadCustomElementsManifestSchemas(null);
+        this.loadCustomElementsManifestSchemas();
         this.resourceManager.invalidate();
         if (this.compilation !== null) {
           this.compilation.templateTypeChecker.updateCustomElementsManifestIndex(

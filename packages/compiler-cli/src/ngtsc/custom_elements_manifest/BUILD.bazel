@@ -17,3 +17,10 @@ ts_project(
         "//packages/compiler-cli/src/ngtsc/util",
     ],
 )
+
+# Shared CEM builders are test-only and are not part of the compiler package API.
+ts_project(
+    name = "testing",
+    testonly = True,
+    srcs = ["testing.ts"],
+)

@@ -19,8 +19,14 @@ import {
 } from '../../file_system';
 import {initMockFileSystem, runInEachFileSystem} from '../../file_system/testing';
 import {CustomElementsManifestLoadResult, loadCustomElementsManifests} from '../src/loader';
-import {resolveCustomElementsManifest} from '../src/manifest_resolver';
-import {isObject} from '../src/type_text';
+import {ManifestResolver} from '../src/manifest_resolver';
+import {
+  createDefinitionExport,
+  createManifest,
+  createManifestElement,
+  createManifestModule,
+  createCustomElementModule,
+} from '../testing';
 
 /** The loaded schemas, or `null` when no manifest yielded any. */
 function schemasOf(
@@ -84,12 +90,9 @@ function writeManifest(path: AbsoluteFsPath, tagName: string, extra: object = {}
   fs.ensureDir(fs.dirname(path));
   fs.writeFile(
     path,
-    validManifestJson({
-      schemaVersion: '1.0.0',
-      modules: [
-        {
-          kind: 'javascript-module',
-          path: 'element.js',
+    JSON.stringify(
+      createManifest([
+        createManifestModule('element.js', {
           declarations: [
             {
               kind: 'class',
@@ -100,57 +103,11 @@ function writeManifest(path: AbsoluteFsPath, tagName: string, extra: object = {}
               ...extra,
             },
           ],
-          exports: [
-            {
-              kind: 'custom-element-definition',
-              name: tagName,
-              declaration: {name: 'SomeElement'},
-            },
-          ],
-        },
-      ],
-    }),
+          exports: [createDefinitionExport(tagName, 'SomeElement')],
+        }),
+      ]),
+    ),
   );
-}
-
-/** Adds definition exports to fixtures that test other loader behavior. */
-function validManifestJson(manifest: unknown): string {
-  if (isObject(manifest) && Array.isArray(manifest['modules'])) {
-    for (const module of manifest['modules']) {
-      if (!isObject(module) || !Array.isArray(module['declarations'])) {
-        continue;
-      }
-      const exports = Array.isArray(module['exports']) ? module['exports'] : [];
-      module['exports'] = exports;
-      for (const declaration of module['declarations']) {
-        if (
-          !isObject(declaration) ||
-          declaration['customElement'] !== true ||
-          typeof declaration['name'] !== 'string' ||
-          typeof declaration['tagName'] !== 'string'
-        ) {
-          continue;
-        }
-        const hasDefinition = exports.some(
-          (entry) =>
-            isObject(entry) &&
-            entry['kind'] === 'custom-element-definition' &&
-            entry['name'] === declaration['tagName'] &&
-            isObject(entry['declaration']) &&
-            entry['declaration']['name'] === declaration['name'] &&
-            entry['declaration']['module'] === undefined,
-        );
-        if (!hasDefinition) {
-          exports.push({
-            kind: 'custom-element-definition',
-            name: declaration['tagName'],
-            declaration: {name: declaration['name']},
-          });
-        }
-      }
-    }
-  }
-  return JSON.stringify(manifest);
 }
 
 runInEachFileSystem(() => {
@@ -164,29 +121,21 @@ runInEachFileSystem(() => {
 
     it('should resolve tsconfig-relative paths', () => {
       writeManifest(_('/project/elements/custom-elements.json'), 'my-element');
-      const result = resolveCustomElementsManifest(
-        './elements/custom-elements.json',
-        basePath,
-        OPTIONS,
-        makeAdapter(),
-        null,
-      );
+      const resolver = new ManifestResolver(basePath, OPTIONS, makeAdapter());
+      const result = resolver.resolveManifest('./elements/custom-elements.json');
       expect(result).toEqual({
         kind: 'success',
         path: _('/project/elements/custom-elements.json'),
         packageName: null,
-        resolutionPaths: new Set([_('/project/elements/custom-elements.json')]),
       });
+      expect(resolver.resolutionPaths).toEqual(
+        new Set([_('/project/elements/custom-elements.json')]),
+      );
     });
 
     it('should fail for relative paths that do not exist', () => {
-      const result = resolveCustomElementsManifest(
-        './missing.json',
-        basePath,
-        OPTIONS,
-        makeAdapter(),
-        null,
-      );
+      const resolver = new ManifestResolver(basePath, OPTIONS, makeAdapter());
+      const result = resolver.resolveManifest('./missing.json');
       expect(result.kind).toBe('failure');
       if (result.kind === 'failure') {
         expect(result.reason).toContain('does not exist');
@@ -195,19 +144,16 @@ runInEachFileSystem(() => {
 
     it('should resolve .json module specifiers through node_modules', () => {
       writeManifest(_('/project/node_modules/@my/lib/custom-elements.json'), 'lib-element');
-      const result = resolveCustomElementsManifest(
-        '@my/lib/custom-elements.json',
-        basePath,
-        OPTIONS,
-        makeAdapter(),
-        null,
-      );
+      const resolver = new ManifestResolver(basePath, OPTIONS, makeAdapter());
+      const result = resolver.resolveManifest('@my/lib/custom-elements.json');
       expect(result).toEqual({
         kind: 'success',
         path: _('/project/node_modules/@my/lib/custom-elements.json'),
         packageName: '@my/lib',
-        resolutionPaths: new Set([_('/project/node_modules/@my/lib/custom-elements.json')]),
       });
+      expect(resolver.resolutionPaths).toEqual(
+        new Set([_('/project/node_modules/@my/lib/custom-elements.json')]),
+      );
     });
 
     it('should resolve bare package names via the customElements package.json field', () => {
@@ -221,22 +167,19 @@ runInEachFileSystem(() => {
           customElements: './dist/custom-elements.json',
         }),
       );
-      const result = resolveCustomElementsManifest(
-        '@my/lib',
-        basePath,
-        OPTIONS,
-        makeAdapter(),
-        null,
-      );
+      const resolver = new ManifestResolver(basePath, OPTIONS, makeAdapter());
+      const result = resolver.resolveManifest('@my/lib');
       expect(result).toEqual({
         kind: 'success',
         path: _('/project/node_modules/@my/lib/dist/custom-elements.json'),
         packageName: '@my/lib',
-        resolutionPaths: new Set([
+      });
+      expect(resolver.resolutionPaths).toEqual(
+        new Set([
           _('/project/node_modules/@my/lib/package.json'),
           _('/project/node_modules/@my/lib/dist/custom-elements.json'),
         ]),
-      });
+      );
     });
 
     it('should resolve a bare package whose exports do not expose package.json', () => {
@@ -256,28 +199,29 @@ runInEachFileSystem(() => {
       );
       fs.writeFile(_('/project/node_modules/@my/exported/dist/index.d.ts'), `export {};`);
 
-      const result = resolveCustomElementsManifest(
-        '@my/exported',
+      const resolver = new ManifestResolver(
         basePath,
         {
           module: ts.ModuleKind.ESNext,
           moduleResolution: ts.ModuleResolutionKind.Bundler,
         },
         makeAdapter(),
-        null,
       );
+      const result = resolver.resolveManifest('@my/exported');
 
       expect(result).toEqual({
         kind: 'success',
         path: _('/project/node_modules/@my/exported/dist/custom-elements.json'),
         packageName: '@my/exported',
-        resolutionPaths: new Set([
+      });
+      expect(resolver.resolutionPaths).toEqual(
+        new Set([
           // Track the missing dist/package.json because creating it can change the package root.
           _('/project/node_modules/@my/exported/dist/package.json'),
           _('/project/node_modules/@my/exported/package.json'),
           _('/project/node_modules/@my/exported/dist/custom-elements.json'),
         ]),
-      });
+      );
     });
 
     it('should fail for packages without a customElements field', () => {
@@ -287,13 +231,8 @@ runInEachFileSystem(() => {
         _('/project/node_modules/plain-lib/package.json'),
         JSON.stringify({name: 'plain-lib', main: './index.js'}),
       );
-      const result = resolveCustomElementsManifest(
-        'plain-lib',
-        basePath,
-        OPTIONS,
-        makeAdapter(),
-        null,
-      );
+      const resolver = new ManifestResolver(basePath, OPTIONS, makeAdapter());
+      const result = resolver.resolveManifest('plain-lib');
       expect(result.kind).toBe('failure');
       if (result.kind === 'failure') {
         expect(result.reason).toContain('no "customElements" field');
@@ -301,42 +240,27 @@ runInEachFileSystem(() => {
     });
 
     it('should fail for packages that cannot be resolved', () => {
-      const result = resolveCustomElementsManifest(
-        '@does/not-exist',
-        basePath,
-        OPTIONS,
-        makeAdapter(),
-        null,
-      );
+      const resolver = new ManifestResolver(basePath, OPTIONS, makeAdapter());
+      const result = resolver.resolveManifest('@does/not-exist');
       expect(result.kind).toBe('failure');
-      expect(result.resolutionPaths).toEqual(new Set());
+      expect(resolver.resolutionPaths).toEqual(new Set());
     });
 
     it('should not retain every failed lookup for a missing JSON module specifier', () => {
-      const result = resolveCustomElementsManifest(
-        '@does/not-exist/custom-elements.json',
-        basePath,
-        OPTIONS,
-        makeAdapter(),
-        null,
-      );
+      const resolver = new ManifestResolver(basePath, OPTIONS, makeAdapter());
+      const result = resolver.resolveManifest('@does/not-exist/custom-elements.json');
 
       expect(result.kind).toBe('failure');
-      expect(result.resolutionPaths).toEqual(new Set());
+      expect(resolver.resolutionPaths).toEqual(new Set());
     });
 
     it('should retain a missing JSON manifest path inside an existing package', () => {
       getFileSystem().ensureDir(_('/project/node_modules/@my/lib'));
-      const result = resolveCustomElementsManifest(
-        '@my/lib/custom-elements.json',
-        basePath,
-        OPTIONS,
-        makeAdapter(),
-        null,
-      );
+      const resolver = new ManifestResolver(basePath, OPTIONS, makeAdapter());
+      const result = resolver.resolveManifest('@my/lib/custom-elements.json');
 
       expect(result.kind).toBe('failure');
-      expect(result.resolutionPaths).toEqual(
+      expect(resolver.resolutionPaths).toEqual(
         new Set([_('/project/node_modules/@my/lib/custom-elements.json')]),
       );
     });
@@ -352,16 +276,11 @@ runInEachFileSystem(() => {
       adapter.recordResourceDependency = (path) => {
         dependencies.add(path);
       };
-      const result = resolveCustomElementsManifest(
-        '@my/lib/custom-elements.json',
-        basePath,
-        OPTIONS,
-        adapter,
-        null,
-      );
+      const resolver = new ManifestResolver(basePath, OPTIONS, adapter);
+      const result = resolver.resolveManifest('@my/lib/custom-elements.json');
       const manifestPath = _('/project/node_modules/@my/lib/custom-elements.json');
       expect(result.kind).toBe('failure');
-      expect(result.resolutionPaths.has(manifestPath)).toBe(true);
+      expect(resolver.resolutionPaths.has(manifestPath)).toBe(true);
       expect(dependencies.has(manifestPath)).toBe(true);
     });
   });
@@ -369,6 +288,10 @@ runInEachFileSystem(() => {
   describe('loadCustomElementsManifests', () => {
     let basePath: AbsoluteFsPath;
     let program: ts.Program;
+
+    function loadManifests(entries: readonly string[], mode: 'summary' | 'verbose' = 'summary') {
+      return loadCustomElementsManifests(entries, basePath, OPTIONS, makeAdapter(), program, mode);
+    }
 
     beforeEach(() => {
       basePath = _('/project');
@@ -388,41 +311,20 @@ runInEachFileSystem(() => {
       const fs = getFileSystem();
       fs.writeFile(
         _('/project/second.json'),
-        validManifestJson({
-          schemaVersion: '1.0.0',
-          modules: [
-            {
-              kind: 'javascript-module',
-              path: 'other.js',
-              declarations: [
-                {
-                  kind: 'class',
-                  name: 'OtherElement',
-                  customElement: true,
-                  tagName: 'my-element',
-                  members: [{kind: 'field', name: 'value', type: {text: 'number'}}],
-                  events: [{name: 'commit', type: {text: 'unknown'}}],
-                },
-                {
-                  kind: 'class',
-                  name: 'SecondElement',
-                  customElement: true,
-                  tagName: 'second-element',
-                },
-              ],
-            },
-          ],
-        }),
+        JSON.stringify(
+          createManifest([
+            createCustomElementModule('other.js', [
+              createManifestElement('OtherElement', 'my-element', {
+                members: [{kind: 'field', name: 'value', type: {text: 'number'}}],
+                events: [{name: 'commit', type: {text: 'unknown'}}],
+              }),
+              createManifestElement('SecondElement', 'second-element'),
+            ]),
+          ]),
+        ),
       );
 
-      const result = loadCustomElementsManifests(
-        ['./first.json', './second.json'],
-        basePath,
-        OPTIONS,
-        makeAdapter(),
-        null,
-        program,
-      );
+      const result = loadManifests(['./first.json', './second.json']);
 
       expect([...result.resolutionPaths]).toEqual(
         jasmine.arrayContaining([_('/project/first.json'), _('/project/second.json')]),
@@ -448,12 +350,9 @@ runInEachFileSystem(() => {
       const fs = getFileSystem();
       fs.writeFile(
         _('/project/definition-only.json'),
-        validManifestJson({
-          schemaVersion: '1.0.0',
-          modules: [
-            {
-              kind: 'javascript-module',
-              path: 'define.js',
+        JSON.stringify(
+          createManifest([
+            createManifestModule('define.js', {
               exports: [
                 {
                   kind: 'custom-element-definition',
@@ -461,20 +360,13 @@ runInEachFileSystem(() => {
                   declaration: {name: 'Missing', module: 'nope.js'},
                 },
               ],
-            },
-          ],
-        }),
+            }),
+          ]),
+        ),
       );
       writeManifest(_('/project/full.json'), 'shared-element');
 
-      const result = loadCustomElementsManifests(
-        ['./definition-only.json', './full.json'],
-        basePath,
-        OPTIONS,
-        makeAdapter(),
-        null,
-        program,
-      );
+      const result = loadManifests(['./definition-only.json', './full.json']);
 
       // The first registration wins even when a later manifest declares more members.
       expect(schemasOf(result)!.length).toBe(1);
@@ -489,14 +381,7 @@ runInEachFileSystem(() => {
     });
 
     it('should produce a diagnostic for unresolvable entries', () => {
-      const result = loadCustomElementsManifests(
-        ['./nope.json'],
-        basePath,
-        OPTIONS,
-        makeAdapter(),
-        null,
-        program,
-      );
+      const result = loadManifests(['./nope.json']);
       expect(schemasOf(result)).toBeNull();
       expect(result.diagnostics.length).toBe(1);
       expect(result.diagnostics[0].code).toBe(
@@ -532,7 +417,6 @@ runInEachFileSystem(() => {
         basePath,
         OPTIONS,
         adapter,
-        null,
         program,
       );
 
@@ -545,14 +429,7 @@ runInEachFileSystem(() => {
       expect(result.diagnostics[0].messageText).toContain('could not be read');
 
       // Load the manifest after recreation.
-      const recovered = loadCustomElementsManifests(
-        ['./vanishing.json', './good.json'],
-        basePath,
-        OPTIONS,
-        makeAdapter(),
-        null,
-        program,
-      );
+      const recovered = loadManifests(['./vanishing.json', './good.json']);
       expect(recovered.diagnostics).toEqual([]);
       expect(schemasOf(recovered)!.map((schema) => schema.tagName)).toEqual([
         'vanishing-element',
@@ -562,14 +439,7 @@ runInEachFileSystem(() => {
 
     it('should report NG4008 for a genuinely empty manifest file', () => {
       getFileSystem().writeFile(_('/project/empty.json'), '');
-      const result = loadCustomElementsManifests(
-        ['./empty.json'],
-        basePath,
-        OPTIONS,
-        makeAdapter(),
-        null,
-        program,
-      );
+      const result = loadManifests(['./empty.json']);
       expect(schemasOf(result)).toBeNull();
       expect(result.diagnostics.length).toBe(1);
       expect(result.diagnostics[0].code).toBe(
@@ -579,14 +449,7 @@ runInEachFileSystem(() => {
 
     it('should produce a diagnostic for unparsable manifests', () => {
       getFileSystem().writeFile(_('/project/bad.json'), 'not json {');
-      const result = loadCustomElementsManifests(
-        ['./bad.json'],
-        basePath,
-        OPTIONS,
-        makeAdapter(),
-        null,
-        program,
-      );
+      const result = loadManifests(['./bad.json']);
       expect(schemasOf(result)).toBeNull();
       expect(result.diagnostics.length).toBe(1);
       expect(result.diagnostics[0].code).toBe(
@@ -603,17 +466,10 @@ runInEachFileSystem(() => {
       writeManifest(_('/project/good.json'), 'good-element');
       getFileSystem().writeFile(
         _('/project/invalid.json'),
-        JSON.stringify({schemaVersion: '1.0.0', modules: 'not-an-array'}),
+        JSON.stringify(createManifest('not-an-array')),
       );
 
-      const result = loadCustomElementsManifests(
-        ['./missing.json', './invalid.json', './good.json'],
-        basePath,
-        OPTIONS,
-        makeAdapter(),
-        null,
-        program,
-      );
+      const result = loadManifests(['./missing.json', './invalid.json', './good.json']);
 
       expect(schemasOf(result)?.map((schema) => schema.tagName)).toEqual(['good-element']);
       expect(result.diagnostics.map((diagnostic) => diagnostic.code)).toEqual([
@@ -640,14 +496,7 @@ runInEachFileSystem(() => {
         ],
       });
 
-      const result = loadCustomElementsManifests(
-        ['./custom-elements.json'],
-        basePath,
-        OPTIONS,
-        makeAdapter(),
-        null,
-        program,
-      );
+      const result = loadManifests(['./custom-elements.json']);
 
       expect(result.diagnostics).toEqual([]);
       expect(schemasOf(result)![0].events[0].checkType).toBe(
@@ -672,18 +521,11 @@ runInEachFileSystem(() => {
       );
       fs.writeFile(
         _('/project/node_modules/@ce/lib/custom-elements.json'),
-        validManifestJson({
-          schemaVersion: '1.0.0',
-          modules: [
-            {
-              kind: 'javascript-module',
-              path: 'element.js',
+        JSON.stringify(
+          createManifest([
+            createManifestModule('element.js', {
               declarations: [
-                {
-                  kind: 'class',
-                  name: 'SomeElement',
-                  customElement: true,
-                  tagName: 'some-element',
+                createManifestElement('SomeElement', 'some-element', {
                   members: [
                     {
                       kind: 'field',
@@ -696,28 +538,15 @@ runInEachFileSystem(() => {
                     },
                   ],
                   attributes: [{name: 'variant', fieldName: 'variant'}],
-                },
+                }),
               ],
-              exports: [
-                {
-                  kind: 'custom-element-definition',
-                  name: 'some-element',
-                  declaration: {name: 'SomeElement'},
-                },
-              ],
-            },
-          ],
-        }),
+              exports: [createDefinitionExport('some-element', 'SomeElement')],
+            }),
+          ]),
+        ),
       );
 
-      const result = loadCustomElementsManifests(
-        ['@ce/lib'],
-        basePath,
-        OPTIONS,
-        makeAdapter(),
-        null,
-        program,
-      );
+      const result = loadManifests(['@ce/lib']);
 
       expect(result.diagnostics).toEqual([]);
       const schema = schemasOf(result)!.find((s) => s.tagName === 'some-element')!;
@@ -754,14 +583,7 @@ runInEachFileSystem(() => {
           if (reexport) {
             fs.writeFile(_(`${packagePath}/generic.d.ts`), declaration);
           }
-          const result = loadCustomElementsManifests(
-            ['@ce/lib'],
-            basePath,
-            OPTIONS,
-            makeAdapter(),
-            null,
-            program,
-          );
+          const result = loadManifests(['@ce/lib']);
           const schema = schemasOf(result)![0];
           expect(schema.properties.find((property) => property.name === 'value')!.checkType).toBe(
             'string',
@@ -786,40 +608,24 @@ runInEachFileSystem(() => {
       const fs = getFileSystem();
       fs.writeFile(
         _('/project/custom-elements.json'),
-        validManifestJson({
-          schemaVersion: '1.0.0',
-          modules: [
-            {
-              kind: 'javascript-module',
-              path: 'element.js',
-              declarations: [
-                {
-                  kind: 'class',
-                  name: 'SomeElement',
-                  customElement: true,
-                  tagName: 'some-element',
-                  members: [
-                    {
-                      kind: 'field',
-                      name: 'label',
-                      type: {text: `'import("@does/not-exist").Missing'`},
-                    },
-                  ],
-                },
-              ],
-            },
-          ],
-        }),
+        JSON.stringify(
+          createManifest([
+            createCustomElementModule('element.js', [
+              createManifestElement('SomeElement', 'some-element', {
+                members: [
+                  {
+                    kind: 'field',
+                    name: 'label',
+                    type: {text: `'import("@does/not-exist").Missing'`},
+                  },
+                ],
+              }),
+            ]),
+          ]),
+        ),
       );
 
-      const result = loadCustomElementsManifests(
-        ['./custom-elements.json'],
-        basePath,
-        OPTIONS,
-        makeAdapter(),
-        null,
-        program,
-      );
+      const result = loadManifests(['./custom-elements.json']);
 
       expect(result.diagnostics).toEqual([]);
       expect(schemasOf(result)![0].properties[0].checkType).toBe(
@@ -831,70 +637,54 @@ runInEachFileSystem(() => {
       const fs = getFileSystem();
       fs.writeFile(
         _('/project/custom-elements.json'),
-        validManifestJson({
-          schemaVersion: '1.0.0',
-          modules: [
-            {
-              kind: 'javascript-module',
-              path: 'element.js',
-              declarations: [
-                {
-                  kind: 'class',
-                  name: 'SomeElement',
-                  customElement: true,
-                  tagName: 'some-element',
-                  members: [
-                    {
-                      kind: 'field',
-                      name: 'variant',
-                      type: {
-                        text: 'Variant',
-                        references: [{name: 'Variant', package: '@does/not-exist'}],
-                      },
+        JSON.stringify(
+          createManifest([
+            createCustomElementModule('element.js', [
+              createManifestElement('SomeElement', 'some-element', {
+                members: [
+                  {
+                    kind: 'field',
+                    name: 'variant',
+                    type: {
+                      text: 'Variant',
+                      references: [{name: 'Variant', package: '@does/not-exist'}],
                     },
-                    {
-                      kind: 'field',
-                      name: 'other',
-                      type: {
-                        text: 'Other',
-                        references: [{name: 'Other', package: '@does/not-exist'}],
-                      },
+                  },
+                  {
+                    kind: 'field',
+                    name: 'other',
+                    type: {
+                      text: 'Other',
+                      references: [{name: 'Other', package: '@does/not-exist'}],
                     },
-                    {kind: 'field', name: 'count', type: {text: 'number'}},
-                  ],
-                  events: [
-                    {
-                      name: 'commit',
-                      type: {
-                        text: 'CommitEvent',
-                        references: [{name: 'CommitEvent', package: '@does/not-exist'}],
-                      },
+                  },
+                  {kind: 'field', name: 'count', type: {text: 'number'}},
+                ],
+                events: [
+                  {
+                    name: 'commit',
+                    type: {
+                      text: 'CommitEvent',
+                      references: [{name: 'CommitEvent', package: '@does/not-exist'}],
                     },
-                  ],
-                  attributes: [
-                    {
-                      name: 'mode',
-                      type: {
-                        text: 'Mode',
-                        references: [{name: 'Mode', package: '@does/not-exist'}],
-                      },
+                  },
+                ],
+                attributes: [
+                  {
+                    name: 'mode',
+                    type: {
+                      text: 'Mode',
+                      references: [{name: 'Mode', package: '@does/not-exist'}],
                     },
-                  ],
-                },
-              ],
-            },
-          ],
-        }),
+                  },
+                ],
+              }),
+            ]),
+          ]),
+        ),
       );
 
-      const result = loadCustomElementsManifests(
-        ['./custom-elements.json'],
-        basePath,
-        OPTIONS,
-        makeAdapter(),
-        null,
-        program,
-      );
+      const result = loadManifests(['./custom-elements.json']);
 
       // One warning per unresolvable specifier, not one per use.
       expect(result.diagnostics.length).toBe(1);
@@ -931,61 +721,44 @@ runInEachFileSystem(() => {
       );
       fs.writeFile(
         _('/project/node_modules/@ce/lib/custom-elements.json'),
-        validManifestJson({
-          schemaVersion: '1.0.0',
-          modules: [
-            {
-              kind: 'javascript-module',
-              path: 'element.js',
-              declarations: [
-                {
-                  kind: 'class',
-                  name: 'MissingElement',
-                  customElement: true,
-                  tagName: 'missing-element',
-                  members: [
-                    {
-                      kind: 'field',
-                      name: 'present',
-                      type: {
-                        text: 'Present',
-                        references: [{name: 'Present', package: '@ce/lib'}],
-                      },
+        JSON.stringify(
+          createManifest([
+            createCustomElementModule('element.js', [
+              createManifestElement('MissingElement', 'missing-element', {
+                members: [
+                  {
+                    kind: 'field',
+                    name: 'present',
+                    type: {
+                      text: 'Present',
+                      references: [{name: 'Present', package: '@ce/lib'}],
                     },
-                    {
-                      kind: 'field',
-                      name: 'missing',
-                      type: {
-                        text: 'Missing',
-                        references: [{name: 'Missing', package: '@ce/lib'}],
-                      },
+                  },
+                  {
+                    kind: 'field',
+                    name: 'missing',
+                    type: {
+                      text: 'Missing',
+                      references: [{name: 'Missing', package: '@ce/lib'}],
                     },
-                  ],
-                  events: [
-                    {
-                      name: 'commit',
-                      type: {
-                        text: 'MissingEvent',
-                        references: [{name: 'MissingEvent', package: '@ce/lib'}],
-                      },
+                  },
+                ],
+                events: [
+                  {
+                    name: 'commit',
+                    type: {
+                      text: 'MissingEvent',
+                      references: [{name: 'MissingEvent', package: '@ce/lib'}],
                     },
-                  ],
-                },
-              ],
-            },
-          ],
-        }),
+                  },
+                ],
+              }),
+            ]),
+          ]),
+        ),
       );
 
-      const result = loadCustomElementsManifests(
-        ['@ce/lib'],
-        basePath,
-        OPTIONS,
-        makeAdapter(),
-        null,
-        program,
-        'verbose',
-      );
+      const result = loadManifests(['@ce/lib'], 'verbose');
 
       expect(result.diagnostics.length).toBe(2);
       expect(
@@ -1021,51 +794,35 @@ runInEachFileSystem(() => {
       const fs = getFileSystem();
       fs.writeFile(
         _('/project/custom-elements.json'),
-        validManifestJson({
-          schemaVersion: '1.0.0',
-          modules: [
-            {
-              kind: 'javascript-module',
-              path: 'element.js',
-              declarations: [
-                {
-                  kind: 'class',
-                  name: 'SomeElement',
-                  customElement: true,
-                  tagName: 'some-element',
-                  members: [
-                    {
-                      kind: 'field',
-                      name: 'first',
-                      type: {
-                        text: 'First',
-                        references: [{name: 'First', package: '@does/not-exist-a'}],
-                      },
+        JSON.stringify(
+          createManifest([
+            createCustomElementModule('element.js', [
+              createManifestElement('SomeElement', 'some-element', {
+                members: [
+                  {
+                    kind: 'field',
+                    name: 'first',
+                    type: {
+                      text: 'First',
+                      references: [{name: 'First', package: '@does/not-exist-a'}],
                     },
-                    {
-                      kind: 'field',
-                      name: 'second',
-                      type: {
-                        text: 'Second',
-                        references: [{name: 'Second', package: '@does/not-exist-b'}],
-                      },
+                  },
+                  {
+                    kind: 'field',
+                    name: 'second',
+                    type: {
+                      text: 'Second',
+                      references: [{name: 'Second', package: '@does/not-exist-b'}],
                     },
-                  ],
-                },
-              ],
-            },
-          ],
-        }),
+                  },
+                ],
+              }),
+            ]),
+          ]),
+        ),
       );
 
-      const result = loadCustomElementsManifests(
-        ['./custom-elements.json'],
-        basePath,
-        OPTIONS,
-        makeAdapter(),
-        null,
-        program,
-      );
+      const result = loadManifests(['./custom-elements.json']);
 
       // In the default summary mode, one warning describes all unusable references.
       expect(result.diagnostics.length).toBe(1);
@@ -1098,30 +855,18 @@ runInEachFileSystem(() => {
       });
       fs.writeFile(
         _('/project/custom-elements.json'),
-        validManifestJson({
-          schemaVersion: '1.0.0',
-          modules: [
-            {
-              kind: 'javascript-module',
-              path: 'element.js',
-              declarations: [
-                declarationFor('BaseButton', 'BaseButton'),
-                declarationFor('BaseInput', 'BaseInput'),
-                declarationFor('GoodElement', 'good-element'),
-              ],
-            },
-          ],
-        }),
+        JSON.stringify(
+          createManifest([
+            createCustomElementModule('element.js', [
+              declarationFor('BaseButton', 'BaseButton'),
+              declarationFor('BaseInput', 'BaseInput'),
+              declarationFor('GoodElement', 'good-element'),
+            ]),
+          ]),
+        ),
       );
 
-      const result = loadCustomElementsManifests(
-        ['./custom-elements.json'],
-        basePath,
-        OPTIONS,
-        makeAdapter(),
-        null,
-        program,
-      );
+      const result = loadManifests(['./custom-elements.json']);
 
       expect(schemasOf(result)!.map((schema) => schema.tagName)).toEqual(['good-element']);
       expect(result.diagnostics.length).toBe(1);
@@ -1135,15 +880,7 @@ runInEachFileSystem(() => {
       expect(message).toContain(`customElementsManifestsDiagnostics = "verbose"`);
 
       // Verbose mode restores the individual warnings.
-      const verbose = loadCustomElementsManifests(
-        ['./custom-elements.json'],
-        basePath,
-        OPTIONS,
-        makeAdapter(),
-        null,
-        program,
-        'verbose',
-      );
+      const verbose = loadManifests(['./custom-elements.json'], 'verbose');
       expect(verbose.diagnostics.length).toBe(2);
       expect(verbose.diagnostics[0].messageText).toContain(`'BaseButton'`);
       expect(verbose.diagnostics[1].messageText).toContain(`'BaseInput'`);
@@ -1153,37 +890,23 @@ runInEachFileSystem(() => {
       const fs = getFileSystem();
       fs.writeFile(
         _('/project/custom-elements.json'),
-        JSON.stringify({
-          schemaVersion: '1.0.0',
-          modules: [
-            {
-              kind: 'javascript-module',
-              path: 'element.js',
+        JSON.stringify(
+          createManifest([
+            createManifestModule('element.js', {
               declarations: [
-                {
-                  kind: 'class',
-                  name: 'SomeElement',
-                  customElement: true,
-                  tagName: 'some-element',
+                createManifestElement('SomeElement', 'some-element', {
                   members: [
                     {kind: 'field', name: 'variant', attribute: 'variant', type: {text: 'string'}},
                   ],
                   events: [{name: 'commit'}],
-                },
+                }),
               ],
-            },
-          ],
-        }),
+            }),
+          ]),
+        ),
       );
 
-      const result = loadCustomElementsManifests(
-        ['./custom-elements.json'],
-        basePath,
-        OPTIONS,
-        makeAdapter(),
-        null,
-        program,
-      );
+      const result = loadManifests(['./custom-elements.json']);
 
       expect(result.diagnostics.length).toBe(1);
       expect(result.diagnostics[0].code).toBe(
@@ -1202,15 +925,7 @@ runInEachFileSystem(() => {
       expect(schema.attributes).toEqual([]);
       expect(schema.events).toEqual([{name: 'commit'}]);
 
-      const verbose = loadCustomElementsManifests(
-        ['./custom-elements.json'],
-        basePath,
-        OPTIONS,
-        makeAdapter(),
-        null,
-        program,
-        'verbose',
-      );
+      const verbose = loadManifests(['./custom-elements.json'], 'verbose');
       expect(verbose.diagnostics.length).toBe(3);
       expect(
         verbose.diagnostics.every(
@@ -1244,14 +959,7 @@ runInEachFileSystem(() => {
         events: [{name: 'change', type: {text: '(value: string) => void'}}],
       });
 
-      const result = loadCustomElementsManifests(
-        ['./custom-elements.json'],
-        basePath,
-        OPTIONS,
-        makeAdapter(),
-        null,
-        program,
-      );
+      const result = loadManifests(['./custom-elements.json']);
 
       expect(result.diagnostics.length).toBe(1);
       expect(result.diagnostics[0].code).toBe(
@@ -1270,15 +978,7 @@ runInEachFileSystem(() => {
       expect(schema.attributes![0].checkType).toBeUndefined();
       expect(schema.events[0].checkType).toBeUndefined();
 
-      const verbose = loadCustomElementsManifests(
-        ['./custom-elements.json'],
-        basePath,
-        OPTIONS,
-        makeAdapter(),
-        null,
-        program,
-        'verbose',
-      );
+      const verbose = loadManifests(['./custom-elements.json'], 'verbose');
       expect(verbose.diagnostics.length).toBe(2);
       expect(verbose.diagnostics[0].messageText).toContain('default | loading | success | error');
       expect(verbose.diagnostics[0].messageText).toContain('type.references');
@@ -1299,7 +999,6 @@ runInEachFileSystem(() => {
           basePath,
           options,
           makeAdapter(),
-          null,
           loadProgram,
           mode,
           cache,
@@ -1349,7 +1048,6 @@ runInEachFileSystem(() => {
             basePath,
             OPTIONS,
             adapter,
-            null,
             program,
             'summary',
             cache,
@@ -1371,6 +1069,77 @@ runInEachFileSystem(() => {
         expect(schemasOf(second)![0].tagName).toBe('renamed-element');
         // The refreshed result is cached in turn.
         expect(load(cache)).toBe(second);
+      });
+
+      for (const readMethod of ['readFile', 'readResource'] as const) {
+        it(`should cache the manifest actually consumed through ${readMethod}`, () => {
+          const path = _('/project/custom-elements.json');
+          writeManifest(path, 'first-element');
+          const adapter = makeAdapter();
+          const readFile = adapter.readFile;
+          const read = (file: string) => {
+            const content = readFile(file);
+            if (file === path && content?.includes('first-element')) {
+              // Simulate an external writer changing the file after the host read it.
+              writeManifest(path, 'second-element');
+            }
+            return content;
+          };
+          if (readMethod === 'readFile') {
+            adapter.readFile = read;
+          } else {
+            adapter.readResource = (file) => read(file) ?? '';
+          }
+          const cache = {entry: null};
+          const loadResource = () =>
+            loadCustomElementsManifests(
+              ['./custom-elements.json'],
+              basePath,
+              OPTIONS,
+              adapter,
+              program,
+              'summary',
+              cache,
+            );
+
+          const first = loadResource();
+          expect(schemasOf(first)![0].tagName).toBe('first-element');
+          const second = loadResource();
+          expect(second).not.toBe(first);
+          expect(schemasOf(second)![0].tagName).toBe('second-element');
+          expect(loadResource()).toBe(second);
+        });
+      }
+
+      it('should not cache a load that consumes different versions of the same manifest', () => {
+        const path = _('/project/custom-elements.json');
+        writeManifest(path, 'first-element');
+        const adapter = makeAdapter();
+        adapter.readResource = (file) => {
+          const content = adapter.readFile(file)!;
+          writeManifest(path, 'second-element');
+          return content;
+        };
+        const cache = {entry: null};
+        const read = () =>
+          loadCustomElementsManifests(
+            ['./custom-elements.json', './custom-elements.json'],
+            basePath,
+            OPTIONS,
+            adapter,
+            program,
+            'summary',
+            cache,
+          );
+
+        expect(schemasOf(read())!.map(({tagName}) => tagName)).toEqual([
+          'first-element',
+          'second-element',
+        ]);
+        expect(cache.entry).toBeNull();
+        const stable = read();
+        expect(schemasOf(stable)!.map(({tagName}) => tagName)).toEqual(['second-element']);
+        expect(read()).toBe(stable);
       });
 
       it('should reload when a manifest is deleted', () => {
@@ -1406,7 +1175,6 @@ runInEachFileSystem(() => {
             basePath,
             OPTIONS,
             resourceAdapter,
-            null,
             program,
             'summary',
             cache,
@@ -1432,17 +1200,23 @@ runInEachFileSystem(() => {
         );
       });
 
-      it('should reload when a missing manifest is created', () => {
-        const cache = {entry: null};
-        const missing = load(cache);
-        expect(schemasOf(missing)).toBeNull();
+      for (const [entry, path] of [
+        ['./custom-elements.json', '/project/custom-elements.json'],
+        ['@new/lib/custom-elements.json', '/project/node_modules/@new/lib/custom-elements.json'],
+      ]) {
+        it(`should reload when a missing manifest ${entry} is created`, () => {
+          const cache = {entry: null};
+          const read = () => load(cache, 'summary', program, OPTIONS, [entry]);
+          const missing = read();
+          expect(schemasOf(missing)).toBeNull();
 
-        writeManifest(_('/project/custom-elements.json'), 'created-element');
-        const created = load(cache);
+          writeManifest(_(path), 'created-element');
+          const created = read();
 
-        expect(created).not.toBe(missing);
-        expect(schemasOf(created)![0].tagName).toBe('created-element');
-      });
+          expect(created).not.toBe(missing);
+          expect(schemasOf(created)![0].tagName).toBe('created-element');
+        });
+      }
 
       it('should reload when a package.json affecting resolution changes', () => {
         const fs = getFileSystem();
@@ -1463,7 +1237,6 @@ runInEachFileSystem(() => {
             basePath,
             OPTIONS,
             makeAdapter(),
-            null,
             program,
             'summary',
             cache,
@@ -1488,18 +1261,13 @@ runInEachFileSystem(() => {
         for (const tag of ['element-a', 'element-b']) {
           fs.writeFile(
             _(`${packagePath}/${tag}.json`),
-            JSON.stringify({
-              schemaVersion: '1.0.0',
-              modules: [
-                {
-                  kind: 'javascript-module',
-                  path: 'element.js',
-                  exports: [
-                    {kind: 'custom-element-definition', name: tag, declaration: {name: 'Element'}},
-                  ],
-                },
-              ],
-            }),
+            JSON.stringify(
+              createManifest([
+                createManifestModule('element.js', {
+                  exports: [createDefinitionExport(tag, 'Element')],
+                }),
+              ]),
+            ),
           );
         }
         const packageJsonPath = _(`${packagePath}/package.json`);
@@ -1530,19 +1298,14 @@ runInEachFileSystem(() => {
         const fs = getFileSystem();
         fs.writeFile(
           _('/project/custom-elements.json'),
-          validManifestJson({
-            schemaVersion: '1.0.0',
-            modules: [
-              {
-                kind: 'javascript-module',
-                path: 'element.js',
-                declarations: [
-                  {kind: 'class', name: 'BaseA', customElement: true, tagName: 'BaseA'},
-                  {kind: 'class', name: 'BaseB', customElement: true, tagName: 'BaseB'},
-                ],
-              },
-            ],
-          }),
+          JSON.stringify(
+            createManifest([
+              createCustomElementModule('element.js', [
+                createManifestElement('BaseA', 'BaseA'),
+                createManifestElement('BaseB', 'BaseB'),
+              ]),
+            ]),
+          ),
         );
         const cache = {entry: null};
         const summary = load(cache, 'summary');
@@ -1581,6 +1344,67 @@ runInEachFileSystem(() => {
         });
 
         expect(second).not.toBe(first);
+      });
+
+      it('should invalidate semantic results when an individual strictness option changes', () => {
+        writeManifest(_('/project/custom-elements.json'), 'my-element', {
+          members: [{kind: 'field', name: 'value', type: {text: '{value}'}}],
+        });
+        const cache = {entry: null};
+        const permissive = load(cache, 'summary', program, {...OPTIONS, noImplicitAny: false});
+        const strict = load(cache, 'summary', program, {...OPTIONS, noImplicitAny: true});
+
+        expect(schemasOf(permissive)![0].properties[0].checkType).toBe('{value}');
+        expect(strict).not.toBe(permissive);
+        expect(schemasOf(strict)![0].properties[0].checkType).toBeUndefined();
+        expect(
+          strict.diagnostics.some(
+            (diagnostic) =>
+              diagnostic.code ===
+              ngErrorCode(ErrorCode.CONFIG_CUSTOM_ELEMENTS_MANIFEST_UNUSABLE_TYPE),
+          ),
+        ).toBeTrue();
+      });
+
+      it('should invalidate when consumer ambient types change without changing disk contents', () => {
+        const path = _('/project/consumer.d.ts');
+        const fs = getFileSystem();
+        fs.writeFile(path, `type GlobalChoice = 'disk';`);
+        writeManifest(_('/project/custom-elements.json'), 'my-element', {
+          members: [
+            {
+              kind: 'field',
+              name: 'value',
+              attribute: 'value',
+              type: {
+                text: 'GlobalChoice',
+                references: [{name: 'GlobalChoice', package: 'global:'}],
+              },
+            },
+          ],
+          attributes: [{name: 'value'}],
+        });
+        const consumer = (choice: string): ts.Program => {
+          const host = new NgtscCompilerHost(fs, OPTIONS);
+          const readSource = host.getSourceFile.bind(host);
+          host.getSourceFile = (fileName, languageVersion) =>
+            fileName === path
+              ? ts.createSourceFile(
+                  fileName,
+                  `type GlobalChoice = '${choice}';`,
+                  languageVersion,
+                  true,
+                )
+              : readSource(fileName, languageVersion);
+          return ts.createProgram({rootNames: [path], options: {...OPTIONS, noLib: true}, host});
+        };
+        const cache = {entry: null};
+        const first = load(cache, 'summary', consumer('first'));
+        const second = load(cache, 'summary', consumer('second'));
+
+        expect(schemasOf(first)![0].attributes[0].stringLiteralValues).toEqual(['first']);
+        expect(second).not.toBe(first);
+        expect(schemasOf(second)![0].attributes[0].stringLiteralValues).toEqual(['second']);
       });
 
       it('should reload when the availability of a referenced global type changes', () => {
@@ -1670,34 +1494,25 @@ runInEachFileSystem(() => {
         // the reference depends on the package-root walk-up from the manifest directory.
         fs.writeFile(
           _('/project/node_modules/@ce/walkup/dist/custom-elements.json'),
-          validManifestJson({
-            schemaVersion: '1.0.0',
-            modules: [
-              {
-                kind: 'javascript-module',
-                path: 'element.js',
-                declarations: [
-                  {
-                    kind: 'class',
-                    name: 'WalkupElement',
-                    customElement: true,
-                    tagName: 'walkup-element',
-                    members: [
-                      {
-                        kind: 'field',
-                        name: 'variant',
-                        type: {
-                          text: 'Variant',
-                          references: [{name: 'Variant', module: 'element.js'}],
-                        },
+          JSON.stringify(
+            createManifest([
+              createCustomElementModule('element.js', [
+                createManifestElement('WalkupElement', 'walkup-element', {
+                  members: [
+                    {
+                      kind: 'field',
+                      name: 'variant',
+                      type: {
+                        text: 'Variant',
+                        references: [{name: 'Variant', module: 'element.js'}],
                       },
-                    ],
-                    attributes: [{name: 'variant', fieldName: 'variant'}],
-                  },
-                ],
-              },
-            ],
-          }),
+                    },
+                  ],
+                  attributes: [{name: 'variant', fieldName: 'variant'}],
+                }),
+              ]),
+            ]),
+          ),
         );
       }
 
@@ -1719,6 +1534,42 @@ runInEachFileSystem(() => {
         const changed = load(cache, 'summary', program, OPTIONS, ['@ce/walkup']);
         expect(changed).not.toBe(first);
         expect(schemasOf(changed)![0].properties[0].checkType).toBeUndefined();
+      });
+
+      it('should reload when a linked declaration resolves to a different real path', () => {
+        writeWalkupPackage();
+        for (const name of ['first', 'second']) {
+          getFileSystem().writeFile(
+            _(`/project/${name}.d.ts`),
+            `${name === 'first' ? "export type Variant = 'first';" : ''}
+             export declare class WalkupElement extends HTMLElement {}`,
+          );
+        }
+        let target = _('/project/first.d.ts');
+        const adapter = makeAdapter();
+        adapter.realpath = (path) =>
+          path === _('/project/node_modules/@ce/walkup/dist/element.d.ts') ? target : path;
+        const cache = {entry: null};
+        const read = () =>
+          loadCustomElementsManifests(
+            ['@ce/walkup'],
+            basePath,
+            OPTIONS,
+            adapter,
+            program,
+            'summary',
+            cache,
+          );
+        const first = read();
+        expect(schemasOf(first)![0].properties[0].checkType).toBe(
+          'import("@ce/walkup/dist/element.js").Variant',
+        );
+
+        target = _('/project/second.d.ts');
+        const second = read();
+        expect(second).not.toBe(first);
+        expect(schemasOf(second)![0].properties[0].checkType).toBeUndefined();
+        expect(read()).toBe(second);
       });
 
       it('should reload when a malformed walk-up package.json candidate is repaired', () => {
@@ -1767,45 +1618,38 @@ runInEachFileSystem(() => {
         );
         fs.writeFile(
           _('/project/node_modules/@ce/cache-types/custom-elements.json'),
-          validManifestJson({
-            schemaVersion: '1.0.0',
-            modules: [
-              {
-                kind: 'javascript-module',
-                path: 'element.js',
-                declarations: [
-                  {
-                    kind: 'class',
-                    name: 'SomeElement',
-                    customElement: true,
-                    tagName: 'cache-element',
-                    members: [
-                      {
-                        kind: 'field',
-                        name: 'variant',
-                        attribute: 'variant',
-                        type: {
-                          text: 'Variant',
-                          references: [{name: 'Variant', package: '@ce/cache-types'}],
-                        },
+          JSON.stringify(
+            createManifest([
+              createCustomElementModule('element.js', [
+                createManifestElement('SomeElement', 'cache-element', {
+                  members: [
+                    {
+                      kind: 'field',
+                      name: 'variant',
+                      attribute: 'variant',
+                      type: {
+                        text: 'Variant',
+                        references: [{name: 'Variant', package: '@ce/cache-types'}],
                       },
-                    ],
-                    attributes: [{name: 'variant', fieldName: 'variant'}],
-                  },
-                ],
-              },
-            ],
-          }),
+                    },
+                  ],
+                  attributes: [{name: 'variant', fieldName: 'variant'}],
+                }),
+              ]),
+            ]),
+          ),
         );
         const cache = {entry: null};
-        const loadPackage = (adapter: NgCompilerAdapter = makeAdapter()) =>
+        const loadPackage = (
+          adapter: NgCompilerAdapter = makeAdapter(),
+          consumer: ts.Program = program,
+        ) =>
           loadCustomElementsManifests(
             ['@ce/cache-types'],
             basePath,
             OPTIONS,
             adapter,
-            null,
-            program,
+            consumer,
             'summary',
             cache,
           );
@@ -1827,6 +1671,30 @@ runInEachFileSystem(() => {
         );
         expect(editorType).not.toBe(initial);
         expect(literalValues(editorType)).toEqual(['a', 'editor']);
+
+        const makeConsumer = (value: string) => {
+          const host = new NgtscCompilerHost(fs, OPTIONS);
+          const variantPath = _('/project/node_modules/@ce/cache-types/variant.d.ts');
+          const readSource = host.getSourceFile.bind(host);
+          host.getSourceFile = (path, version) =>
+            path === variantPath
+              ? ts.createSourceFile(path, `export type Variant = '${value}';`, version, true)
+              : readSource(path, version);
+          return ts.createProgram({
+            rootNames: [...program.getRootFileNames(), variantPath],
+            options: {...OPTIONS, noLib: true},
+            host,
+          });
+        };
+        const consumer = makeConsumer('consumer');
+        const consumerType = loadPackage(makeAdapter(), consumer);
+        expect(literalValues(consumerType)).toEqual(['consumer']);
+        expect(loadPackage(makeAdapter(), consumer)).toBe(consumerType);
+        const updatedConsumerType = loadPackage(makeAdapter(), makeConsumer('updated'));
+        expect(updatedConsumerType).not.toBe(consumerType);
+        expect(literalValues(updatedConsumerType)).toEqual(['updated']);
+        // Dropping the source from the consumer program returns authority to the host.
+        expect(literalValues(loadPackage())).toEqual(['a', 'b']);
 
         fs.writeFile(
           _('/project/node_modules/@ce/cache-types/variant.d.ts'),
@@ -1870,39 +1738,30 @@ runInEachFileSystem(() => {
         );
         fs.writeFile(
           _('/project/node_modules/@ce/cache-create/custom-elements.json'),
-          validManifestJson({
-            schemaVersion: '1.0.0',
-            modules: [
-              {
-                kind: 'javascript-module',
-                path: 'element.js',
-                declarations: [
-                  {
-                    kind: 'class',
-                    name: 'SomeElement',
-                    customElement: true,
-                    tagName: 'created-type-element',
-                    members: [
-                      {
-                        kind: 'field',
-                        name: 'variant',
-                        type: {
-                          text: 'Variant',
-                          references: [
-                            {
-                              name: 'Variant',
-                              package: '@ce/cache-create',
-                              module: 'types.js',
-                            },
-                          ],
-                        },
+          JSON.stringify(
+            createManifest([
+              createCustomElementModule('element.js', [
+                createManifestElement('SomeElement', 'created-type-element', {
+                  members: [
+                    {
+                      kind: 'field',
+                      name: 'variant',
+                      type: {
+                        text: 'Variant',
+                        references: [
+                          {
+                            name: 'Variant',
+                            package: '@ce/cache-create',
+                            module: 'types.js',
+                          },
+                        ],
                       },
-                    ],
-                  },
-                ],
-              },
-            ],
-          }),
+                    },
+                  ],
+                }),
+              ]),
+            ]),
+          ),
         );
         const cache = {entry: null};
         const loadPackage = () =>
@@ -1941,43 +1800,27 @@ runInEachFileSystem(() => {
       );
       fs.writeFile(
         _('/project/node_modules/@ce/value-only/custom-elements.json'),
-        validManifestJson({
-          schemaVersion: '1.0.0',
-          modules: [
-            {
-              kind: 'javascript-module',
-              path: 'element.js',
-              declarations: [
-                {
-                  kind: 'class',
-                  name: 'ValueElement',
-                  customElement: true,
-                  tagName: 'value-element',
-                  members: [
-                    {
-                      kind: 'field',
-                      name: 'value',
-                      type: {
-                        text: 'ValueOnly',
-                        references: [{name: 'ValueOnly', package: '@ce/value-only'}],
-                      },
+        JSON.stringify(
+          createManifest([
+            createCustomElementModule('element.js', [
+              createManifestElement('ValueElement', 'value-element', {
+                members: [
+                  {
+                    kind: 'field',
+                    name: 'value',
+                    type: {
+                      text: 'ValueOnly',
+                      references: [{name: 'ValueOnly', package: '@ce/value-only'}],
                     },
-                  ],
-                },
-              ],
-            },
-          ],
-        }),
+                  },
+                ],
+              }),
+            ]),
+          ]),
+        ),
       );
 
-      const result = loadCustomElementsManifests(
-        ['@ce/value-only'],
-        basePath,
-        OPTIONS,
-        makeAdapter(),
-        null,
-        program,
-      );
+      const result = loadManifests(['@ce/value-only']);
 
       expect(result.diagnostics.length).toBe(1);
       expect(result.diagnostics[0].code).toBe(
@@ -1994,51 +1837,35 @@ runInEachFileSystem(() => {
       const fs = getFileSystem();
       fs.writeFile(
         _('/project/custom-elements.json'),
-        validManifestJson({
-          schemaVersion: '1.0.0',
-          modules: [
-            {
-              kind: 'javascript-module',
-              path: 'element.js',
-              declarations: [
-                {
-                  kind: 'class',
-                  name: 'GlobalElement',
-                  customElement: true,
-                  tagName: 'global-element',
-                  members: [
-                    {
-                      kind: 'field',
-                      name: 'keyboardEvent',
-                      type: {
-                        text: 'KeyboardEvent',
-                        references: [{name: 'KeyboardEvent', package: 'global:'}],
-                      },
+        JSON.stringify(
+          createManifest([
+            createCustomElementModule('element.js', [
+              createManifestElement('GlobalElement', 'global-element', {
+                members: [
+                  {
+                    kind: 'field',
+                    name: 'keyboardEvent',
+                    type: {
+                      text: 'KeyboardEvent',
+                      references: [{name: 'KeyboardEvent', package: 'global:'}],
                     },
-                    {
-                      kind: 'field',
-                      name: 'missing',
-                      type: {
-                        text: 'NotARealType',
-                        references: [{name: 'NotARealType', package: 'global:'}],
-                      },
+                  },
+                  {
+                    kind: 'field',
+                    name: 'missing',
+                    type: {
+                      text: 'NotARealType',
+                      references: [{name: 'NotARealType', package: 'global:'}],
                     },
-                  ],
-                },
-              ],
-            },
-          ],
-        }),
+                  },
+                ],
+              }),
+            ]),
+          ]),
+        ),
       );
 
-      const result = loadCustomElementsManifests(
-        ['./custom-elements.json'],
-        basePath,
-        OPTIONS,
-        makeAdapter(),
-        null,
-        program,
-      );
+      const result = loadManifests(['./custom-elements.json']);
 
       expect(result.diagnostics.length).toBe(1);
       expect(result.diagnostics[0].code).toBe(
@@ -2085,7 +1912,6 @@ runInEachFileSystem(() => {
         basePath,
         OPTIONS,
         makeAdapter(),
-        null,
         solutionStyleProgram,
       );
 
@@ -2104,7 +1930,6 @@ runInEachFileSystem(() => {
         basePath,
         OPTIONS,
         makeAdapter(),
-        null,
         solutionStyleProgram,
         'verbose',
       );
@@ -2141,18 +1966,11 @@ runInEachFileSystem(() => {
       );
       fs.writeFile(
         _('/project/node_modules/@ce/nested/dist/custom-elements.json'),
-        validManifestJson({
-          schemaVersion: '1.0.0',
-          modules: [
-            {
-              kind: 'javascript-module',
-              path: 'components/nested/nested.js',
+        JSON.stringify(
+          createManifest([
+            createManifestModule('components/nested/nested.js', {
               declarations: [
-                {
-                  kind: 'class',
-                  name: 'NestedElement',
-                  customElement: true,
-                  tagName: 'nested-element',
+                createManifestElement('NestedElement', 'nested-element', {
                   members: [
                     {kind: 'field', name: 'value', type: {text: 'string'}},
                     {
@@ -2171,7 +1989,7 @@ runInEachFileSystem(() => {
                       },
                     },
                   ],
-                },
+                }),
               ],
               exports: [
                 {
@@ -2179,10 +1997,11 @@ runInEachFileSystem(() => {
                   name: 'default',
                   declaration: {name: 'NestedElement'},
                 },
+                createDefinitionExport('nested-element', 'NestedElement'),
               ],
-            },
-          ],
-        }),
+            }),
+          ]),
+        ),
       );
       const options = {
         module: ts.ModuleKind.ESNext,
@@ -2194,7 +2013,6 @@ runInEachFileSystem(() => {
         basePath,
         options,
         makeAdapter(),
-        null,
         program,
       );
 
@@ -2228,7 +2046,6 @@ describe('manifest resolution on a case-insensitive Windows file system', () => 
       _('/project'),
       OPTIONS,
       makeAdapter(),
-      null,
       windowsProgram(),
     );
     expect(result.diagnostics).toEqual([]);
@@ -2250,30 +2067,21 @@ describe('manifest resolution on a case-insensitive Windows file system', () => 
     // Resolve the package root from a nested manifest directory on a case-insensitive Windows path.
     fs.writeFile(
       _('/project/node_modules/@scope/pkg/dist/custom-elements.json'),
-      validManifestJson({
-        schemaVersion: '1.0.0',
-        modules: [
-          {
-            kind: 'javascript-module',
-            path: 'element.js',
-            declarations: [
-              {
-                kind: 'class',
-                name: 'ScopedElement',
-                customElement: true,
-                tagName: 'scoped-element',
-                members: [
-                  {
-                    kind: 'field',
-                    name: 'variant',
-                    type: {text: 'Variant', references: [{name: 'Variant', module: 'element.js'}]},
-                  },
-                ],
-              },
-            ],
-          },
-        ],
-      }),
+      JSON.stringify(
+        createManifest([
+          createCustomElementModule('element.js', [
+            createManifestElement('ScopedElement', 'scoped-element', {
+              members: [
+                {
+                  kind: 'field',
+                  name: 'variant',
+                  type: {text: 'Variant', references: [{name: 'Variant', module: 'element.js'}]},
+                },
+              ],
+            }),
+          ]),
+        ]),
+      ),
     );
 
     const result = loadCustomElementsManifests(
@@ -2281,7 +2089,6 @@ describe('manifest resolution on a case-insensitive Windows file system', () => 
       _('/project'),
       OPTIONS,
       makeAdapter(),
-      null,
       windowsProgram(),
     );
 
@@ -2307,33 +2114,24 @@ describe('manifest resolution on a case-insensitive Windows file system', () => 
     );
     fs.writeFile(
       _('/project/node_modules/@scope/back/custom-elements.json'),
-      validManifestJson({
-        schemaVersion: '1.0.0',
-        modules: [
-          {
-            kind: 'javascript-module',
-            path: 'dist\\element.js',
-            declarations: [
-              {
-                kind: 'class',
-                name: 'BackslashElement',
-                customElement: true,
-                tagName: 'backslash-element',
-                members: [
-                  {
-                    kind: 'field',
-                    name: 'variant',
-                    type: {
-                      text: 'Variant',
-                      references: [{name: 'Variant', module: 'dist\\element.js'}],
-                    },
+      JSON.stringify(
+        createManifest([
+          createCustomElementModule('dist\\element.js', [
+            createManifestElement('BackslashElement', 'backslash-element', {
+              members: [
+                {
+                  kind: 'field',
+                  name: 'variant',
+                  type: {
+                    text: 'Variant',
+                    references: [{name: 'Variant', module: 'dist\\element.js'}],
                   },
-                ],
-              },
-            ],
-          },
-        ],
-      }),
+                },
+              ],
+            }),
+          ]),
+        ]),
+      ),
     );
 
     const result = loadCustomElementsManifests(
@@ -2341,7 +2139,6 @@ describe('manifest resolution on a case-insensitive Windows file system', () => 
       _('/project'),
       OPTIONS,
       makeAdapter(),
-      null,
       windowsProgram(),
     );
 

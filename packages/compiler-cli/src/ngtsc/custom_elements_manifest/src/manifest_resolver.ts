@@ -7,301 +7,378 @@
  */
 
 import ts from 'typescript';
-
 import {NgCompilerAdapter} from '../../core/api';
 import {AbsoluteFsPath, absoluteFrom, dirname, isRooted, join, resolve} from '../../file_system';
 import {
   createLookupResolutionHost,
   getFailedModuleLookupLocations,
+  resolveModuleName,
 } from '../../util/src/typescript';
-import {resolveResourceModule} from './module_resolution';
 
-/** Result of resolving a `customElementsManifests` option entry to a manifest file. */
 export type ManifestResolutionResult =
   | {
       kind: 'success';
       path: AbsoluteFsPath;
-      /**
-       * The owning npm package, or `null` for a path entry. Used to resolve type references
-       * within the same package.
-       */
       packageName: string | null;
-      /** Files whose changes can alter this resolution, including the resolved manifest. */
-      resolutionPaths: Set<AbsoluteFsPath>;
     }
-  | {kind: 'failure'; reason: string; resolutionPaths: Set<AbsoluteFsPath>};
+  | {kind: 'failure'; reason: string};
 
-/**
- * Extracts the package name from a module specifier, such as `@my/lib/custom-elements.json`.
- * Returns `null` if the specifier does not start with a valid package name.
- */
-function packageNameOfSpecifier(specifier: string): string | null {
-  const segments = specifier.split('/');
-  const packageName = specifier.startsWith('@')
-    ? segments.length >= 2
-      ? `${segments[0]}/${segments[1]}`
-      : null
-    : (segments[0] ?? null);
-  return packageName !== null && packageName.length > 0 ? packageName : null;
+/** Host views are distinct: an editor source or resource may differ from the file on disk. */
+interface FileObservations {
+  exists?: boolean;
+  directory?: boolean;
+  realpath?: string;
+  file?: string | null;
+  source?: string | null;
+  manifest?: string | null;
+}
+
+interface ModuleResolution {
+  resolvedModule: ts.ResolvedModule | undefined;
+  affectingLocations?: readonly string[];
+  failedLookupLocations?: readonly string[];
 }
 
 const MANIFEST_MARKER = '.$ngcustomelements$';
 
 /**
- * Resolves a `customElementsManifests` entry to an absolute manifest path.
- *
- * Three forms are supported:
- *  - Paths relative to the tsconfig directory, such as `./custom-elements.json`, or absolute paths.
- *  - JSON module specifiers, such as `@my/lib/custom-elements.json`, resolved through the project.
- *  - Package names, such as `@my/lib`, whose `package.json` has a `customElements` field.
+ * The filesystem boundary for one manifest load. All manifest and declaration resolution uses
+ * fresh caches and one dependency ledger. Resource paths additionally notify incremental hosts;
+ * file and directory observations validate reuse without creating directory-wide watches.
  */
-export function resolveCustomElementsManifest(
-  entry: string,
-  basePath: AbsoluteFsPath,
-  options: ts.CompilerOptions,
-  adapter: NgCompilerAdapter,
-  moduleResolutionCache: ts.ModuleResolutionCache | null,
-): ManifestResolutionResult {
-  if (entry.startsWith('./') || entry.startsWith('../') || isRooted(entry)) {
-    const path = resolve(basePath, entry);
-    adapter.recordResourceDependency?.(path);
-    if (adapter.fileExists(path)) {
-      return {kind: 'success', path, packageName: null, resolutionPaths: new Set([path])};
-    }
-    return {
-      kind: 'failure',
-      reason: `The file '${path}' does not exist.`,
-      resolutionPaths: new Set([path]),
-    };
-  }
+export class ManifestResolver {
+  readonly files = new Map<AbsoluteFsPath, FileObservations>();
+  hasConsistentReads = true;
+  readonly resolutionPaths = new Set<AbsoluteFsPath>();
+  readonly typeModuleResolutionCache: ts.ModuleResolutionCache;
+  readonly canCache: boolean;
+  private readonly jsonModuleResolutionCache: ts.ModuleResolutionCache;
+  private readonly resolutionHost: ts.ModuleResolutionHost &
+    Pick<ts.CompilerHost, 'resolveModuleNames'>;
+  private readonly host: ts.ModuleResolutionHost & Pick<ts.CompilerHost, 'getCurrentDirectory'>;
 
-  if (entry.endsWith('.json')) {
-    const resolution = resolveJsonSpecifier(
-      entry,
+  constructor(
+    readonly basePath: AbsoluteFsPath,
+    readonly options: ts.CompilerOptions,
+    readonly adapter: NgCompilerAdapter,
+  ) {
+    this.resolutionHost = adapter.resourceResolutionHost ?? adapter;
+    this.canCache = this.resolutionHost.resolveModuleNames === undefined;
+    this.typeModuleResolutionCache = ts.createModuleResolutionCache(
       basePath,
+      adapter.getCanonicalFileName.bind(adapter),
       options,
-      adapter,
-      moduleResolutionCache,
     );
-    if (resolution.path !== null) {
-      resolution.resolutionPaths.add(resolution.path);
-      return {
-        kind: 'success',
-        path: resolution.path,
-        packageName: packageNameOfSpecifier(entry),
-        resolutionPaths: resolution.resolutionPaths,
-      };
-    }
-    return {
-      kind: 'failure',
-      reason: `The module specifier '${entry}' could not be resolved to a file.`,
-      resolutionPaths: resolution.resolutionPaths,
-    };
-  }
-
-  // For a package name, read the manifest path from its `customElements` field.
-  const packageJsonResolution = resolveJsonSpecifier(
-    `${entry}/package.json`,
-    basePath,
-    options,
-    adapter,
-    moduleResolutionCache,
-  );
-  let packageJsonPath = packageJsonResolution.path;
-  if (packageJsonPath === null) {
-    // If the package does not export package.json, find it through the public entry point.
-    packageJsonPath = resolvePackageJsonFromEntrypoint(
-      entry,
+    this.jsonModuleResolutionCache = ts.createModuleResolutionCache(
       basePath,
-      options,
-      adapter,
-      moduleResolutionCache,
-      packageJsonResolution.resolutionPaths,
+      adapter.getCanonicalFileName.bind(adapter),
+      {...options, resolveJsonModule: true},
     );
-  }
-  if (packageJsonPath === null) {
-    return {
-      kind: 'failure',
-      reason: `The package '${entry}' could not be resolved.`,
-      resolutionPaths: packageJsonResolution.resolutionPaths,
-    };
-  }
-  packageJsonResolution.resolutionPaths.add(packageJsonPath);
-
-  const packageJsonContent = adapter.readFile(packageJsonPath);
-  let customElementsField: unknown;
-  try {
-    customElementsField =
-      packageJsonContent !== undefined
-        ? (JSON.parse(packageJsonContent) as {[key: string]: unknown})['customElements']
-        : undefined;
-  } catch {
-    return {
-      kind: 'failure',
-      reason: `Failed to parse '${packageJsonPath}' as JSON.`,
-      resolutionPaths: packageJsonResolution.resolutionPaths,
-    };
-  }
-  if (typeof customElementsField !== 'string') {
-    return {
-      kind: 'failure',
-      reason:
-        `The package '${entry}' does not declare a Custom Elements Manifest: its package.json ` +
-        `has no "customElements" field. Specify the path to the manifest file directly instead ` +
-        `(e.g. '${entry}/custom-elements.json').`,
-      resolutionPaths: packageJsonResolution.resolutionPaths,
+    this.host = {
+      fileExists: (path) => this.fileExists(path),
+      readFile: (path) => this.readFile(path),
+      directoryExists:
+        adapter.directoryExists === undefined ? undefined : (path) => this.directoryExists(path),
+      getDirectories: adapter.getDirectories?.bind(adapter),
+      getCurrentDirectory: adapter.getCurrentDirectory.bind(adapter),
+      realpath: adapter.realpath === undefined ? undefined : (path) => this.realpath(path),
+      trace: adapter.trace?.bind(adapter),
+      useCaseSensitiveFileNames:
+        typeof adapter.useCaseSensitiveFileNames === 'function'
+          ? adapter.useCaseSensitiveFileNames.bind(adapter)
+          : adapter.useCaseSensitiveFileNames,
     };
   }
 
-  const manifestPath = resolve(dirname(packageJsonPath), customElementsField);
-  adapter.recordResourceDependency?.(manifestPath);
-  packageJsonResolution.resolutionPaths.add(manifestPath);
-  if (!adapter.fileExists(manifestPath)) {
-    return {
-      kind: 'failure',
-      reason:
-        `The "customElements" field of the package.json of '${entry}' points to ` +
-        `'${manifestPath}', which does not exist.`,
-      resolutionPaths: packageJsonResolution.resolutionPaths,
-    };
+  fileExists(path: string): boolean {
+    const exists = this.adapter.fileExists(path);
+    this.observe(path, 'exists', exists);
+    return exists;
   }
-  return {
-    kind: 'success',
-    path: manifestPath,
-    packageName: entry,
-    resolutionPaths: packageJsonResolution.resolutionPaths,
-  };
-}
 
-/** Resolves a package's public entry point and finds the package.json that owns it. */
-function resolvePackageJsonFromEntrypoint(
-  packageName: string,
-  basePath: AbsoluteFsPath,
-  options: ts.CompilerOptions,
-  adapter: NgCompilerAdapter,
-  moduleResolutionCache: ts.ModuleResolutionCache | null,
-  candidatePaths: Set<AbsoluteFsPath>,
-): AbsoluteFsPath | null {
-  const {resolvedModule: resolved} = resolveResourceModule(
-    packageName,
-    join(basePath, 'index.ts'),
-    options,
-    adapter,
-    moduleResolutionCache,
-  );
-  if (resolved === undefined) {
-    return null;
+  directoryExists(path: string): boolean {
+    const exists = this.adapter.directoryExists?.(path) ?? true;
+    this.observe(path, 'directory', exists);
+    return exists;
   }
-  return findOwningPackageJson(
-    dirname(absoluteFrom(resolved.resolvedFileName)),
-    packageName,
-    adapter,
-    candidatePaths,
-  );
-}
 
-/**
- * Finds the nearest ancestor package.json whose `name` matches `packageName`, skipping invalid
- * JSON. Records every candidate path so creating or correcting a nearer file invalidates the cache.
- */
-export function findOwningPackageJson(
-  startDirectory: AbsoluteFsPath,
-  packageName: string,
-  adapter: NgCompilerAdapter,
-  candidatePaths: Set<AbsoluteFsPath>,
-): AbsoluteFsPath | null {
-  let directory = startDirectory;
-  while (true) {
-    const packageJsonPath = join(directory, 'package.json');
-    candidatePaths.add(packageJsonPath);
-    const content = adapter.fileExists(packageJsonPath) ? adapter.readFile(packageJsonPath) : null;
-    if (typeof content === 'string') {
-      try {
-        if ((JSON.parse(content) as {[key: string]: unknown})['name'] === packageName) {
-          return packageJsonPath;
-        }
-      } catch {
-        // Keep walking.
+  readFile(path: string): string | undefined {
+    const content = this.adapter.readFile(path);
+    this.observe(path, 'file', content ?? null);
+    return content;
+  }
+
+  realpath(path: string): string {
+    const resolved = this.adapter.realpath?.(path) ?? path;
+    this.observe(path, 'realpath', resolved);
+    return resolved;
+  }
+
+  /** Consumer sources are authoritative; hosts may also supply unsaved declaration files. */
+  getSourceFile(
+    path: string,
+    languageVersion: ts.ScriptTarget | ts.CreateSourceFileOptions,
+    program: ts.Program,
+  ): ts.SourceFile | undefined {
+    let source = this.readSourceFile(path, languageVersion, program);
+    if (source === undefined) {
+      const text = this.adapter.readFile(path);
+      if (text !== undefined) {
+        source = ts.createSourceFile(path, text, languageVersion, true);
       }
     }
+    this.observe(path, 'source', source?.text ?? null);
+    return source;
+  }
 
-    const parent = dirname(directory);
-    if (parent === directory) {
-      return null;
+  private readSourceFile(
+    path: string,
+    languageVersion: ts.ScriptTarget | ts.CreateSourceFileOptions,
+    program: ts.Program,
+  ): ts.SourceFile | undefined {
+    return program.getSourceFile(path) ?? this.adapter.getSourceFile(path, languageVersion);
+  }
+
+  readManifest(path: AbsoluteFsPath): string | null {
+    this.watch(path);
+    const content = this.readResource(path);
+    this.observe(path, 'manifest', content);
+    return content;
+  }
+
+  private readResource(path: AbsoluteFsPath): string | null {
+    if (this.adapter.readResource !== undefined) {
+      const text = this.adapter.readResource(path);
+      if (typeof text === 'string') {
+        return text === '' && !this.adapter.fileExists(path) ? null : text;
+      }
     }
-    directory = parent;
-  }
-}
-
-interface JsonSpecifierResolution {
-  path: AbsoluteFsPath | null;
-  resolutionPaths: Set<AbsoluteFsPath>;
-}
-
-/**
- * Resolves a JSON module specifier with `resolveJsonModule` enabled. Uses the host's
- * `resolveModuleNames` when available and respects package exports.
- * Records resolution dependencies and missing manifest paths so later changes reload the schemas.
- * Files excluded by package exports remain unresolved even if they exist on disk.
- */
-function resolveJsonSpecifier(
-  specifier: string,
-  basePath: AbsoluteFsPath,
-  options: ts.CompilerOptions,
-  adapter: NgCompilerAdapter,
-  moduleResolutionCache: ts.ModuleResolutionCache | null,
-): JsonSpecifierResolution {
-  const containingFile = join(basePath, 'index.ts');
-  const resolutionPaths = new Set<AbsoluteFsPath>();
-
-  const {
-    resolvedModule: resolved,
-    affectingLocations,
-    failedLookupLocations,
-  } = resolveResourceModule(
-    specifier,
-    containingFile,
-    {...options, resolveJsonModule: true},
-    adapter,
-    moduleResolutionCache,
-  );
-  // Track package export redirects even when the manifest has no type declarations.
-  for (const path of affectingLocations) {
-    resolutionPaths.add(absoluteFrom(path));
-    adapter.recordResourceDependency?.(absoluteFrom(path));
-  }
-  if (resolved !== undefined && resolved.resolvedFileName.endsWith('.json')) {
-    const path = absoluteFrom(resolved.resolvedFileName);
-    resolutionPaths.add(path);
-    return {path, resolutionPaths};
+    return this.adapter.fileExists(path) ? (this.adapter.readFile(path) ?? null) : null;
   }
 
-  const candidates = [
-    // Actual failed JSON lookups include paths redirected by package exports.
-    ...failedLookupLocations.filter(
-      (path) => path.endsWith('.json') && !path.endsWith('/package.json'),
-    ),
-    ...(
-      getFailedModuleLookupLocations(
-        specifier,
-        containingFile,
-        options,
-        createLookupResolutionHost(adapter, MANIFEST_MARKER),
-        MANIFEST_MARKER,
-      ) ?? []
-    ).filter((path) => path.endsWith(specifier)),
-  ];
-  for (const candidate of candidates) {
-    const path = absoluteFrom(candidate);
-    // Track missing files only in existing directories to limit speculative node_modules watches.
-    // These paths detect file creation. They do not bypass package exports during resolution.
-    if (
-      adapter.directoryExists?.(dirname(path)) ??
-      adapter.fileExists(join(dirname(path), 'package.json'))
-    ) {
-      resolutionPaths.add(path);
-      adapter.recordResourceDependency?.(path);
+  /** Capture inputs when they are consumed, never by rereading after producing the result. */
+  private observe<K extends keyof FileObservations>(
+    path: string,
+    kind: K,
+    value: FileObservations[K],
+  ): void {
+    const absolutePath = absoluteFrom(path);
+    let file = this.files.get(absolutePath);
+    if (file === undefined) {
+      this.files.set(absolutePath, (file = {}));
+    }
+    if (file[kind] !== undefined && file[kind] !== value) {
+      this.hasConsistentReads = false;
+    }
+    file[kind] = value;
+  }
+
+  /** Validate each observation through the host view that supplied it, including missing paths. */
+  matches(files: ReadonlyMap<AbsoluteFsPath, FileObservations>, program: ts.Program): boolean {
+    for (const [path, file] of files) {
+      if (
+        (file.exists !== undefined && this.adapter.fileExists(path) !== file.exists) ||
+        (file.directory !== undefined &&
+          (this.adapter.directoryExists?.(path) ?? true) !== file.directory) ||
+        (file.realpath !== undefined &&
+          (this.adapter.realpath?.(path) ?? path) !== file.realpath) ||
+        (file.file !== undefined && (this.adapter.readFile(path) ?? null) !== file.file) ||
+        (file.source !== undefined &&
+          (this.readSourceFile(path, ts.ScriptTarget.Latest, program)?.text ??
+            this.adapter.readFile(path) ??
+            null) !== file.source) ||
+        (file.manifest !== undefined && this.readResource(path) !== file.manifest)
+      ) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  private watch(path: AbsoluteFsPath): void {
+    this.resolutionPaths.add(path);
+    this.adapter.recordResourceDependency?.(path);
+  }
+
+  /** Resolve the same import contract that will be emitted into the consumer's type-check block. */
+  resolveModule(
+    specifier: string,
+    containingFile: string = join(this.basePath, 'index.ts'),
+    mode?: ts.ResolutionMode,
+  ): ts.ResolvedModule | undefined {
+    return this.resolve(
+      specifier,
+      containingFile,
+      this.options,
+      this.typeModuleResolutionCache,
+      mode,
+    ).resolvedModule;
+  }
+
+  private resolve(
+    specifier: string,
+    containingFile: string,
+    options: ts.CompilerOptions,
+    cache: ts.ModuleResolutionCache,
+    mode?: ts.ResolutionMode,
+  ): ModuleResolution {
+    if (this.resolutionHost.resolveModuleNames !== undefined) {
+      // A custom resolver may depend on state that cannot be observed. Its loads are not cached.
+      return {
+        resolvedModule: resolveModuleName(
+          specifier,
+          containingFile,
+          options,
+          this.resolutionHost,
+          cache,
+        ),
+      };
+    }
+    const result: ModuleResolution = ts.resolveModuleName(
+      specifier,
+      containingFile,
+      options,
+      this.host,
+      cache,
+      undefined,
+      mode ?? ts.getImpliedNodeFormatForFile(containingFile, cache, this.host, options),
+    );
+    for (const path of result.affectingLocations ?? []) {
+      this.watch(absoluteFrom(path));
+    }
+    return result;
+  }
+
+  resolveManifest(entry: string): ManifestResolutionResult {
+    const failure = (reason: string): ManifestResolutionResult => ({
+      kind: 'failure',
+      reason,
+    });
+    const success = (
+      path: AbsoluteFsPath,
+      packageName: string | null,
+    ): ManifestResolutionResult => ({
+      kind: 'success',
+      path,
+      packageName,
+    });
+    if (entry.startsWith('./') || entry.startsWith('../') || isRooted(entry)) {
+      const path = resolve(this.basePath, entry);
+      this.watch(path);
+      return this.fileExists(path)
+        ? success(path, null)
+        : failure(`The file '${path}' does not exist.`);
+    }
+    if (entry.endsWith('.json')) {
+      const path = this.resolveJson(entry);
+      const segments = entry.split('/');
+      const packageName = entry.startsWith('@') ? segments.slice(0, 2).join('/') : segments[0];
+      return path === null
+        ? failure(`The module specifier '${entry}' could not be resolved to a file.`)
+        : success(path, packageName);
+    }
+    let packageJson = this.resolveJson(`${entry}/package.json`);
+    if (packageJson === null) {
+      const resolved = this.resolveModule(entry);
+      if (resolved !== undefined) {
+        packageJson = this.findOwningPackageJson(
+          dirname(absoluteFrom(resolved.resolvedFileName)),
+          entry,
+        );
+      }
+    }
+    if (packageJson === null) {
+      return failure(`The package '${entry}' could not be resolved.`);
+    }
+    this.watch(packageJson);
+    let customElements: unknown;
+    try {
+      const content = this.readFile(packageJson);
+      customElements =
+        content === undefined
+          ? undefined
+          : (JSON.parse(content) as {[key: string]: unknown})['customElements'];
+    } catch {
+      return failure(`Failed to parse '${packageJson}' as JSON.`);
+    }
+    if (typeof customElements !== 'string') {
+      return failure(
+        `The package '${entry}' does not declare a Custom Elements Manifest: its package.json ` +
+          `has no "customElements" field. Specify the path to the manifest file directly instead ` +
+          `(e.g. '${entry}/custom-elements.json').`,
+      );
+    }
+    const path = resolve(dirname(packageJson), customElements);
+    this.watch(path);
+    return this.fileExists(path)
+      ? success(path, entry)
+      : failure(
+          `The "customElements" field of the package.json of '${entry}' points to '${path}', which does not exist.`,
+        );
+  }
+
+  /** Record every ancestor candidate, including missing or malformed nearer package metadata. */
+  findOwningPackageJson(directory: AbsoluteFsPath, packageName: string): AbsoluteFsPath | null {
+    while (true) {
+      const path = join(directory, 'package.json');
+      this.watch(path);
+      if (this.fileExists(path)) {
+        try {
+          if (
+            (JSON.parse(this.readFile(path)!) as {[key: string]: unknown})['name'] === packageName
+          ) {
+            return path;
+          }
+        } catch {
+          // A malformed candidate cannot establish package identity. Continue with its parent.
+        }
+      }
+      const parent = dirname(directory);
+      if (parent === directory) {
+        return null;
+      }
+      directory = parent;
     }
   }
-  return {path: null, resolutionPaths};
+
+  private resolveJson(specifier: string): AbsoluteFsPath | null {
+    const containingFile = join(this.basePath, 'index.ts');
+    const {resolvedModule, failedLookupLocations} = this.resolve(
+      specifier,
+      containingFile,
+      {...this.options, resolveJsonModule: true},
+      this.jsonModuleResolutionCache,
+    );
+    if (resolvedModule?.resolvedFileName.endsWith('.json')) {
+      const path = absoluteFrom(resolvedModule.resolvedFileName);
+      this.watch(path);
+      return path;
+    }
+    const candidates = [
+      ...(failedLookupLocations ?? []).filter(
+        (path) => path.endsWith('.json') && !path.endsWith('/package.json'),
+      ),
+      ...(
+        getFailedModuleLookupLocations(
+          specifier,
+          containingFile,
+          this.options,
+          createLookupResolutionHost(this.host, MANIFEST_MARKER),
+          MANIFEST_MARKER,
+        ) ?? []
+      ).filter((path) => path.endsWith(specifier)),
+    ];
+    for (const candidate of candidates) {
+      const path = absoluteFrom(candidate);
+      // Observe creation in existing directories without bypassing package exports.
+      if (
+        this.adapter.directoryExists === undefined
+          ? this.fileExists(join(dirname(path), 'package.json'))
+          : this.directoryExists(dirname(path))
+      ) {
+        this.watch(path);
+      }
+    }
+    return null;
+  }
 }
