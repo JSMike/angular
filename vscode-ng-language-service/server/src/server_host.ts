@@ -7,8 +7,9 @@
  */
 
 import * as ts from 'typescript/lib/tsserverlibrary';
-import * as path from 'path';
 import * as lsp from 'vscode-languageserver/node';
+
+import {toPathKey} from './utils';
 
 const NOOP_WATCHER: ts.FileWatcher = {
   close() {},
@@ -32,7 +33,7 @@ export class ServerHost implements ts.server.ServerHost {
 
   constructor(
     readonly isG3: boolean,
-    private readonly useClientSideFileWatcher: boolean,
+    readonly useClientSideFileWatcher: boolean,
   ) {
     this.args = ts.sys.args;
     this.newLine = ts.sys.newLine;
@@ -70,23 +71,37 @@ export class ServerHost implements ts.server.ServerHost {
     options?: ts.WatchOptions,
   ): ts.FileWatcher {
     if (!this.useClientSideFileWatcher) {
-      return ts.sys.watchFile!(path, callback, pollingInterval, options);
+      return this.watchFileNative(path, callback, pollingInterval, options);
     }
 
-    const callbacks = this.fileWatchers.get(path) ?? new Set();
+    const key = toPathKey(path, this.useCaseSensitiveFileNames);
+    const callbacks = this.fileWatchers.get(key) ?? new Set();
     callbacks.add(callback);
-    this.fileWatchers.set(path, callbacks);
+    this.fileWatchers.set(key, callbacks);
     return {
       close: () => {
-        const callbacks = this.fileWatchers.get(path);
+        const callbacks = this.fileWatchers.get(key);
         if (callbacks) {
           callbacks.delete(callback);
           if (callbacks.size === 0) {
-            this.fileWatchers.delete(path);
+            this.fileWatchers.delete(key);
           }
         }
       },
     };
+  }
+
+  /**
+   * Watches a file directly via the Node filesystem even when `useClientSideFileWatcher` is
+   * enabled (used as a fallback when the LSP client lacks dynamic relative-pattern watching).
+   */
+  watchFileNative(
+    path: string,
+    callback: ts.FileWatcherCallback,
+    pollingInterval?: number,
+    options?: ts.WatchOptions,
+  ): ts.FileWatcher {
+    return ts.sys.watchFile!(path, callback, pollingInterval, options);
   }
 
   watchDirectory(
@@ -101,17 +116,18 @@ export class ServerHost implements ts.server.ServerHost {
     if (!this.useClientSideFileWatcher) {
       return ts.sys.watchDirectory!(path, callback, recursive, options);
     }
-    const callbacks = this.directoryWatchers.get(path) ?? new Set();
+    const key = toPathKey(path, this.useCaseSensitiveFileNames);
+    const callbacks = this.directoryWatchers.get(key) ?? new Set();
     const watcher = {callback, recursive: !!recursive};
     callbacks.add(watcher);
-    this.directoryWatchers.set(path, callbacks);
+    this.directoryWatchers.set(key, callbacks);
     return {
       close: () => {
-        const callbacks = this.directoryWatchers.get(path);
+        const callbacks = this.directoryWatchers.get(key);
         if (callbacks) {
           callbacks.delete(watcher);
           if (callbacks.size === 0) {
-            this.directoryWatchers.delete(path);
+            this.directoryWatchers.delete(key);
           }
         }
       },
@@ -123,23 +139,25 @@ export class ServerHost implements ts.server.ServerHost {
       return;
     }
 
-    const callbacks = this.fileWatchers.get(fileName);
+    const fileKey = toPathKey(fileName, this.useCaseSensitiveFileNames);
+    const callbacks = this.fileWatchers.get(fileKey);
     if (callbacks) {
       callbacks.forEach((callback) =>
         callback(
           fileName,
           type === lsp.FileChangeType.Deleted
             ? ts.FileWatcherEventKind.Deleted
-            : ts.FileWatcherEventKind.Changed,
+            : type === lsp.FileChangeType.Created
+              ? ts.FileWatcherEventKind.Created
+              : ts.FileWatcherEventKind.Changed,
         ),
       );
     }
 
-    for (const [dirPath, watchers] of this.directoryWatchers) {
-      if (fileName.startsWith(dirPath)) {
-        // If it's a direct child or recursive watch
-        const relative = path.relative(dirPath, fileName);
-        const isDirectChild = !relative.includes(path.sep);
+    for (const [dirKey, watchers] of this.directoryWatchers) {
+      const prefix = dirKey.endsWith('/') ? dirKey : `${dirKey}/`;
+      if (fileKey === dirKey || fileKey.startsWith(prefix)) {
+        const isDirectChild = fileKey === dirKey || !fileKey.slice(prefix.length).includes('/');
 
         for (const watcher of watchers) {
           if (watcher.recursive || isDirectChild) {

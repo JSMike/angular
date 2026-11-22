@@ -40,6 +40,18 @@ export function filePathToUri(filePath: string): lsp.DocumentUri {
 }
 
 /**
+ * Normalizes a filesystem path into a map lookup key with forward slashes and host-appropriate
+ * casing so LSP URI paths (`URI.fsPath`) match TypeScript paths on Windows.
+ */
+export function toPathKey(fileName: string, useCaseSensitiveFileNames: boolean): string {
+  let normalized = fileName.replace(/\\/g, '/');
+  if (normalized.length > 1 && !/^[A-Za-z]:\/$/.test(normalized)) {
+    normalized = normalized.replace(/\/+$/, '');
+  }
+  return useCaseSensitiveFileNames ? normalized : normalized.toLowerCase();
+}
+
+/**
  * Converts ts.FileTextChanges to lsp.WorkspaceEdit.
  */
 export function tsFileTextChangesToLspWorkspaceEdit(
