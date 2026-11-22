@@ -22,13 +22,20 @@ import {
 } from './core';
 import {NgCompilerOptions} from './core/api';
 import {DocEntry} from './docs';
-import {absoluteFrom, AbsoluteFsPath, getFileSystem, resolve} from './file_system';
+import {
+  absoluteFrom,
+  absoluteFromSourceFile,
+  AbsoluteFsPath,
+  getFileSystem,
+  resolve,
+} from './file_system';
 import {TrackedIncrementalBuildStrategy} from './incremental';
 import {ActivePerfRecorder, PerfCheckpoint as PerfCheckpoint, PerfEvent, PerfPhase} from './perf';
 import {TsCreateProgramDriver} from './program_driver';
 import {DeclarationNode} from './reflection';
-import {retagAllTsFiles} from './shims';
+import {getShimActiveCemImports, isShim, retagAllTsFiles} from './shims';
 import {OptimizeFor} from './typecheck/api';
+import {isCemImportReachableInProgram} from './util/src/typescript';
 
 /**
  * Entrypoint to the Angular Compiler (Ivy+) which sits behind the `api.Program` interface, allowing
@@ -86,6 +93,52 @@ export class NgtscProgram implements api.Program {
     perfRecorder.memory(PerfCheckpoint.TypeScriptProgramCreate);
 
     this.host.postProgramCreationCleanup();
+
+    // If a reused `.ngtypecheck.ts` shim from `reuseProgram` emitted a CEM `import(...)` whose
+    // target is no longer reachable from non-shim user files, drop those stale shims from the
+    // input program so removed global augmentations cannot linger in `getTsSemanticDiagnostics()`
+    // (even across multiple consecutive incremental builds that skip template type-checking).
+    if (reuseProgram !== undefined) {
+      let resolutionCache: ts.ModuleResolutionCache | null = null;
+      const nonShimCache = new Map<ts.Path, boolean>();
+      const staleShims = new Set<AbsoluteFsPath>();
+      for (const sf of reuseProgram.getSourceFiles()) {
+        const activeImports = getShimActiveCemImports(sf);
+        if (activeImports === null || this.tsProgram.getSourceFile(sf.fileName) === undefined) {
+          continue;
+        }
+        for (const [emittingFile, specifier] of activeImports) {
+          if (
+            !isCemImportReachableInProgram(
+              this.tsProgram,
+              this.host,
+              emittingFile,
+              specifier,
+              isShim,
+              () =>
+                (resolutionCache ??= ts.createModuleResolutionCache(
+                  this.host.getCurrentDirectory(),
+                  (fileName) => this.host.getCanonicalFileName(fileName),
+                  options,
+                )),
+              nonShimCache,
+            )
+          ) {
+            staleShims.add(absoluteFromSourceFile(sf));
+            break;
+          }
+        }
+      }
+      if (staleShims.size > 0) {
+        const previousProgram = this.tsProgram;
+        this.host = NgCompilerHost.wrap(delegateHost, rootNames, options, reuseProgram, staleShims);
+        retagAllTsFiles(previousProgram);
+        this.tsProgram = perfRecorder.inPhase(PerfPhase.TypeScriptProgramCreate, () =>
+          ts.createProgram(this.host.inputFiles, options, this.host, previousProgram),
+        );
+        this.host.postProgramCreationCleanup();
+      }
+    }
 
     const programDriver = new TsCreateProgramDriver(
       this.tsProgram,

@@ -7,6 +7,7 @@
  */
 
 import {
+  CustomElementsManifestIndex,
   generateIndexerAnalysis,
   IndexedComponent,
   IndexingContext,
@@ -26,6 +27,10 @@ import {
   ReferencesRegistry,
 } from '../../annotations';
 import {InjectableClassRegistry, JitDeclarationRegistry} from '../../annotations/common';
+import {
+  CustomElementsManifestParseCache,
+  loadCustomElementsManifests,
+} from '../../custom_elements_manifest';
 import {CycleAnalyzer, CycleHandlingStrategy, ImportGraph} from '../../cycles';
 import {
   addDiagnosticDetails,
@@ -37,6 +42,7 @@ import {
 import {DocEntry, DocsExtractor} from '../../docs';
 import {checkForPrivateExports, ReferenceGraph} from '../../entry_point';
 import {
+  absoluteFrom,
   absoluteFromSourceFile,
   AbsoluteFsPath,
   LogicalFileSystem,
@@ -65,6 +71,7 @@ import {
   UnifiedModulesStrategy,
 } from '../../imports';
 import {
+  haveSameManifestIndex,
   IncrementalBuildStrategy,
   IncrementalCompilation,
   IncrementalState,
@@ -199,6 +206,7 @@ export interface IncrementalTypeScriptCompilationTicket {
   enableTemplateTypeChecker: boolean;
   usePoisonedData: boolean;
   perfRecorder: ActivePerfRecorder;
+  customElementsManifestParseCache?: CustomElementsManifestParseCache;
 }
 
 export interface IncrementalResourceCompilationTicket {
@@ -295,6 +303,7 @@ export function incrementalFromCompilerTicket(
     programDriver,
     newProgram,
     perfRecorder,
+    customElementsManifestParseCache: oldCompiler.customElementsManifestParseCache,
   };
 }
 
@@ -388,9 +397,14 @@ export class NgCompiler {
   private closureCompilerEnabled: boolean;
   private currentProgram: ts.Program;
   private entryPoint: ts.SourceFile | null;
+  private moduleResolutionCache: ts.ModuleResolutionCache;
   private moduleResolver: ModuleResolver;
   private resourceManager: AdapterResourceLoader;
   private cycleAnalyzer: CycleAnalyzer;
+  readonly customElementsManifestParseCache: CustomElementsManifestParseCache;
+  private customElementsManifestIndex: CustomElementsManifestIndex | null = null;
+  private customElementsManifestDiagnostics: ts.Diagnostic[] = [];
+  private customElementsManifestResolutionPaths = new Set<AbsoluteFsPath>();
   readonly ignoreForDiagnostics: Set<ts.SourceFile>;
   readonly ignoreForEmit: Set<ts.SourceFile>;
   readonly enableTemplateTypeChecker: boolean;
@@ -445,6 +459,7 @@ export class NgCompiler {
           ticket.enableTemplateTypeChecker,
           ticket.usePoisonedData,
           ticket.perfRecorder,
+          ticket.customElementsManifestParseCache,
         );
       case CompilationTicketKind.IncrementalResource:
         const compiler = ticket.compiler;
@@ -463,7 +478,10 @@ export class NgCompiler {
     enableTemplateTypeChecker: boolean,
     readonly usePoisonedData: boolean,
     private livePerfRecorder: ActivePerfRecorder,
+    customElementsManifestParseCache?: CustomElementsManifestParseCache,
   ) {
+    this.customElementsManifestParseCache =
+      customElementsManifestParseCache ?? new CustomElementsManifestParseCache();
     this.angularCoreVersion = options['_angularCoreVersion'] ?? null;
     this.delegatingPerfRecorder = new DelegatingPerfRecorder(this.perfRecorder);
     this.usePoisonedData = usePoisonedData || !!options._compilePoisonedComponents;
@@ -489,6 +507,7 @@ export class NgCompiler {
       ...this.adapter.constructionDiagnostics,
       ...verifyCompatibleTypeCheckOptions(this.options),
       ...verifyEmitDeclarationOnly(this.options),
+      ...verifyCustomElementsManifestsOptions(this.options),
     );
 
     this.currentProgram = inputProgram;
@@ -505,6 +524,7 @@ export class NgCompiler {
       // way into all kinds of places inside TS internal objects.
       this.adapter.getCanonicalFileName.bind(this.adapter),
     );
+    this.moduleResolutionCache = moduleResolutionCache;
     this.moduleResolver = new ModuleResolver(
       inputProgram,
       this.options,
@@ -515,6 +535,8 @@ export class NgCompiler {
     this.cycleAnalyzer = new CycleAnalyzer(
       new ImportGraph(inputProgram.getTypeChecker(), this.delegatingPerfRecorder),
     );
+    this.loadCustomElementsManifestSchemas();
+    this.incrementalCompilation.recordCustomElementsManifestIndex(this.customElementsManifestIndex);
     this.incrementalStrategy.setIncrementalState(this.incrementalCompilation.state, inputProgram);
 
     this.ignoreForDiagnostics = new Set(
@@ -548,6 +570,42 @@ export class NgCompiler {
     this.delegatingPerfRecorder.target = perfRecorder;
 
     perfRecorder.inPhase(PerfPhase.ResourceUpdate, () => {
+      let manifestChanged = false;
+      if (this.customElementsManifestResolutionPaths.size > 0) {
+        for (const resourceFile of changedResources) {
+          if (this.customElementsManifestResolutionPaths.has(resolve(resourceFile))) {
+            manifestChanged = true;
+            break;
+          }
+        }
+      }
+      if (manifestChanged) {
+        const previousIndex = this.customElementsManifestIndex;
+        this.loadCustomElementsManifestSchemas();
+        this.incrementalCompilation.recordCustomElementsManifestIndex(
+          this.customElementsManifestIndex,
+        );
+        if (
+          this.compilation !== null &&
+          !haveSameManifestIndex(previousIndex, this.customElementsManifestIndex)
+        ) {
+          this.compilation.templateTypeChecker.updateCustomElementsManifestIndex(
+            this.customElementsManifestIndex,
+          );
+          for (const records of this.compilation.traitCompiler.getAnalyzedRecords().values()) {
+            for (const record of records) {
+              if (
+                ts.isClassDeclaration(record.node) &&
+                (this.compilation.resourceRegistry.getTemplate(record.node) !== null ||
+                  this.compilation.resourceRegistry.getHostBindings(record.node) !== null)
+              ) {
+                this.compilation.templateTypeChecker.invalidateClass(record.node);
+              }
+            }
+          }
+        }
+      }
+
       if (this.compilation === null) {
         // Analysis hasn't happened yet, so no update is necessary - any changes to resources will
         // be captured by the initial analysis pass itself.
@@ -587,6 +645,46 @@ export class NgCompiler {
     this.ensureAnalyzed();
 
     return this.incrementalCompilation.depGraph.getResourceDependencies(file);
+  }
+
+  /**
+   * Get the files whose changes can change which Custom Elements Manifests resolve or what they
+   * contain, including resolution candidates that do not exist yet.
+   */
+  getCustomElementsManifestResolutionPaths(): ReadonlySet<AbsoluteFsPath> {
+    return this.customElementsManifestResolutionPaths;
+  }
+
+  private loadCustomElementsManifestSchemas(): void {
+    const entries = getValidCustomElementsManifestsOption(this.options);
+    if (entries === null || entries.length === 0) {
+      this.customElementsManifestIndex = null;
+      this.customElementsManifestDiagnostics = [];
+      this.customElementsManifestResolutionPaths = new Set();
+      return;
+    }
+    const configuredBasePath = this.options['basePath'];
+    const basePath =
+      typeof configuredBasePath === 'string'
+        ? absoluteFrom(configuredBasePath)
+        : absoluteFrom(this.adapter.getCurrentDirectory());
+    // Use a dedicated resolution cache per load so `package.json` `exports` changes on resource
+    // reloads never return stale cached manifest paths from `this.moduleResolutionCache`.
+    const manifestResolutionCache = ts.createModuleResolutionCache(
+      this.adapter.getCurrentDirectory(),
+      this.adapter.getCanonicalFileName.bind(this.adapter),
+    );
+    const result = loadCustomElementsManifests(
+      entries,
+      basePath,
+      this.options,
+      this.adapter,
+      manifestResolutionCache,
+      this.customElementsManifestParseCache,
+    );
+    this.customElementsManifestIndex = result.index;
+    this.customElementsManifestDiagnostics = result.diagnostics;
+    this.customElementsManifestResolutionPaths = result.resolutionPaths;
   }
 
   /**
@@ -702,7 +800,9 @@ export class NgCompiler {
    * Get all setup-related diagnostics for this compilation.
    */
   getOptionDiagnostics(): ts.Diagnostic[] {
-    return this.constructionDiagnostics;
+    return this.customElementsManifestDiagnostics.length === 0
+      ? this.constructionDiagnostics
+      : [...this.constructionDiagnostics, ...this.customElementsManifestDiagnostics];
   }
 
   /**
@@ -1133,6 +1233,7 @@ export class NgCompiler {
         allowDomEventAssertion,
         checkTypeOfNgTemplateBindings: false, // 3p-only
         // g3-only checkTypeOfNgTemplateBindings: true,
+        customElementsManifestIndex: this.customElementsManifestIndex,
       };
     } else {
       typeCheckingConfig = {
@@ -1168,6 +1269,7 @@ export class NgCompiler {
         checkUnknownElements: false,
         checkTypeOfNgTemplateBindings: false, // 3p-only
         // g3-only checkTypeOfNgTemplateBindings: true,
+        customElementsManifestIndex: this.customElementsManifestIndex,
       };
     }
 
@@ -1872,6 +1974,32 @@ function verifyEmitDeclarationOnly(options: NgCompilerOptions): ts.Diagnostic[] 
       messageText: 'TS compiler option "emitDeclarationOnly" is not supported.',
     }),
   ];
+}
+
+function* verifyCustomElementsManifestsOptions(
+  options: NgCompilerOptions,
+): Generator<ts.Diagnostic, void, void> {
+  if (
+    options.customElementsManifests !== undefined &&
+    getValidCustomElementsManifestsOption(options) === null
+  ) {
+    yield makeConfigDiagnostic({
+      category: ts.DiagnosticCategory.Error,
+      code: ErrorCode.CONFIG_CUSTOM_ELEMENTS_MANIFEST_INVALID,
+      messageText:
+        'Angular compiler option "customElementsManifests" must be an array of non-empty strings.',
+    });
+  }
+}
+
+function getValidCustomElementsManifestsOption(
+  options: NgCompilerOptions,
+): readonly string[] | null {
+  const value = options.customElementsManifests;
+  return Array.isArray(value) &&
+    value.every((entry) => typeof entry === 'string' && entry.trim().length > 0)
+    ? value
+    : null;
 }
 
 function makeConfigDiagnostic({

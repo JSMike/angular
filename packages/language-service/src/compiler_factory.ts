@@ -47,11 +47,22 @@ export class CompilerFactory {
       modifiedResourceFiles.add(resolve(fileName));
     }
 
+    if (this.compiler !== null) {
+      for (const fileName of this.adapter.getModifiedManifestFiles(
+        this.compiler.getCustomElementsManifestResolutionPaths(),
+      )) {
+        modifiedResourceFiles.add(fileName);
+      }
+    }
+
     if (this.compiler !== null && program === this.compiler.getCurrentProgram()) {
       if (modifiedResourceFiles.size > 0) {
         // Only resource files have changed since the last NgCompiler was created.
         const ticket = resourceChangeTicket(this.compiler, modifiedResourceFiles);
         this.compiler = NgCompiler.fromTicket(ticket, this.adapter);
+        this.adapter.syncManifestSnapshots(
+          this.compiler.getCustomElementsManifestResolutionPaths(),
+        );
       } else {
         // The previous NgCompiler is being reused, but we still want to reset its performance
         // tracker to capture only the operations that are needed to service the current request.
@@ -83,6 +94,7 @@ export class CompilerFactory {
       );
     }
     this.compiler = NgCompiler.fromTicket(ticket, this.adapter);
+    this.adapter.syncManifestSnapshots(this.compiler.getCustomElementsManifestResolutionPaths());
     return this.compiler;
   }
 }

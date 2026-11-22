@@ -6,6 +6,7 @@
  * found in the LICENSE file at https://angular.dev/license
  */
 
+import {CustomElementsManifestIndex} from '@angular/compiler';
 import ts from 'typescript';
 
 import {absoluteFromSourceFile, AbsoluteFsPath, resolve} from '../../file_system';
@@ -80,6 +81,11 @@ export class IncrementalCompilation implements IncrementalBuild<ClassRecord, Fil
    * Exposed via the `state` read-only getter.
    */
   private _state: IncrementalState;
+
+  /** Custom Elements Manifest schemas recorded for this compilation. */
+  private customElementsManifestIndex: CustomElementsManifestIndex | null = null;
+  /** Whether Custom Elements Manifest schemas changed relative to the prior compilation. */
+  private customElementsManifestsChanged = false;
 
   private constructor(
     state: IncrementalState,
@@ -286,6 +292,7 @@ export class IncrementalCompilation implements IncrementalBuild<ClassRecord, Fil
       priorAnalysis: traitCompiler.getAnalyzedRecords(),
       typeCheckResults: null,
       emitted,
+      customElementsManifestIndex: this.customElementsManifestIndex,
     };
 
     // We now enter the type-check and emit phase of compilation.
@@ -294,6 +301,29 @@ export class IncrementalCompilation implements IncrementalBuild<ClassRecord, Fil
       needsEmit,
       needsTypeCheckEmit,
     };
+  }
+
+  /**
+   * Records the Custom Elements Manifest index of this compilation. Because PR #1 emits identical
+   * JS/d.ts output regardless of manifests, a manifest change only invalidates cached template
+   * type-checking results (reusing prior analysis and emit state).
+   */
+  recordCustomElementsManifestIndex(index: CustomElementsManifestIndex | null): void {
+    this.customElementsManifestIndex = index;
+    if (this._state.kind === IncrementalStateKind.Analyzed) {
+      if (!haveSameManifestIndex(this._state.customElementsManifestIndex, index)) {
+        this._state.typeCheckResults = null;
+        this.customElementsManifestsChanged = true;
+      }
+      this._state.customElementsManifestIndex = index;
+      return;
+    }
+    if (
+      this.step !== null &&
+      !haveSameManifestIndex(this.step.priorState.customElementsManifestIndex, index)
+    ) {
+      this.customElementsManifestsChanged = true;
+    }
   }
 
   recordSuccessfulTypeCheck(results: Map<AbsoluteFsPath, FileTypeCheckingData>): void {
@@ -347,9 +377,10 @@ export class IncrementalCompilation implements IncrementalBuild<ClassRecord, Fil
 
     const sfPath = absoluteFromSourceFile(sf);
 
-    // If the file has logically changed, or its template type-checking results have semantically
-    // changed, then past type-checking results cannot be reused.
+    // If the file has logically changed, its template type-checking results have semantically
+    // changed, or Custom Elements Manifests changed, past type-checking results cannot be reused.
     if (
+      this.customElementsManifestsChanged ||
       this.step.logicallyChangedTsFiles.has(sfPath) ||
       this.phase.needsTypeCheckEmit.has(sfPath)
     ) {
@@ -428,4 +459,23 @@ function toOriginalSourceFile(sf: ts.SourceFile): ts.SourceFile {
   } else {
     return unredirectedSf;
   }
+}
+
+export function haveSameManifestIndex(
+  a: CustomElementsManifestIndex | null,
+  b: CustomElementsManifestIndex | null,
+): boolean {
+  if (a === b) {
+    return true;
+  }
+  if (a === null || b === null) {
+    return false;
+  }
+  if (
+    a.schemas.length === b.schemas.length &&
+    a.schemas.every((schema, idx) => schema === b.schemas[idx])
+  ) {
+    return true;
+  }
+  return JSON.stringify(a.schemas) === JSON.stringify(b.schemas);
 }

@@ -6,6 +6,7 @@
  * found in the LICENSE file at https://angular.dev/license
  */
 import {
+  CemImportReachability,
   DomSchemaChecker,
   generateTypeCheckBlock,
   OutOfBandDiagnosticRecorder,
@@ -39,7 +40,31 @@ export class TypeCheckFile extends Environment {
   readonly isTypeCheckFile = true;
   private nextTcbId = 1;
   private tcbStatements: string[] = [];
+  private readonly cemHelpers = new Set<string>();
+  private readonly cemHelperStatements: string[] = [];
+  private readonly cemAliases = new Map<string, string>();
+  private readonly cemAliasStatements: string[] = [];
+  private nextCemAliasId = 1;
   private sourceContent: string = '';
+
+  hoistCemHelper(name: string, declaration: string): void {
+    if (this.cemHelpers.has(name)) {
+      return;
+    }
+    this.cemHelpers.add(name);
+    this.cemHelperStatements.push(declaration);
+  }
+
+  hoistCemAlias(key: string, prefix: string, typeExpr: string): string {
+    const existing = this.cemAliases.get(key);
+    if (existing !== undefined) {
+      return existing;
+    }
+    const alias = `${prefix}${this.nextCemAliasId++}`;
+    this.cemAliases.set(key, alias);
+    this.cemAliasStatements.push(`type ${alias} = ${typeExpr}`);
+    return alias;
+  }
   get hasCopiedSource() {
     return this.copiedSourceOriginPath !== undefined;
   }
@@ -67,6 +92,7 @@ export class TypeCheckFile extends Environment {
     config: TypeCheckingConfig,
     refEmitter: ReferenceEmitter,
     compilerHost: Pick<ts.CompilerHost, 'getCanonicalFileName'>,
+    cemImportGate?: (emittingFile: string, specifier: string) => CemImportReachability,
   ) {
     super(
       config,
@@ -84,6 +110,8 @@ export class TypeCheckFile extends Environment {
         ts.ScriptTarget.Latest,
         true,
       ),
+      undefined,
+      cemImportGate,
     );
   }
 
@@ -141,6 +169,14 @@ export class TypeCheckFile extends Environment {
     }
 
     source += '\n';
+
+    for (const stmt of this.cemHelperStatements) {
+      source += `${stmt};\n`;
+    }
+
+    for (const stmt of this.cemAliasStatements) {
+      source += `${stmt};\n`;
+    }
 
     for (const expr of this.pipeInstStatements) {
       source += `${expr.print()};\n`;

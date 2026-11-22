@@ -81,6 +81,7 @@ export class ShimAdapter {
     topLevelGenerators: TopLevelShimGenerator[],
     perFileGenerators: PerFileShimGenerator[],
     oldProgram: ts.Program | null,
+    excludedPriorShims?: ReadonlySet<AbsoluteFsPath>,
   ) {
     // Initialize `this.generators` with a regex that matches each generator's paths.
     for (const gen of perFileGenerators) {
@@ -131,8 +132,12 @@ export class ShimAdapter {
         if (oldSf.isDeclarationFile || !isFileShimSourceFile(oldSf)) {
           continue;
         }
+        const oldPath = absoluteFromSourceFile(oldSf);
+        if (excludedPriorShims?.has(oldPath)) {
+          continue;
+        }
 
-        this.priorShims.set(absoluteFromSourceFile(oldSf), oldSf);
+        this.priorShims.set(oldPath, oldSf);
       }
     }
   }

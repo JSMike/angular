@@ -205,6 +205,69 @@ export type RequiredDelegations<T> = {
 };
 
 /**
+ * Derives a `ts.ModuleResolutionHost` from a compiler host that recognizes `marker` and avoids
+ * filesystem probes for synthetic lookup paths. For use with `getFailedModuleLookupLocations`.
+ */
+export function createLookupResolutionHost(
+  host: ts.ModuleResolutionHost & Pick<ts.CompilerHost, 'getCurrentDirectory'>,
+  marker: string,
+): RequiredDelegations<ts.ModuleResolutionHost> {
+  return {
+    directoryExists(directoryName: string): boolean {
+      if (directoryName.includes(marker)) {
+        return false;
+      } else if (host.directoryExists !== undefined) {
+        return host.directoryExists(directoryName);
+      } else {
+        return true;
+      }
+    },
+    fileExists(fileName: string): boolean {
+      if (fileName.includes(marker)) {
+        return false;
+      } else {
+        return host.fileExists(fileName);
+      }
+    },
+    readFile: host.readFile.bind(host),
+    getCurrentDirectory: host.getCurrentDirectory.bind(host),
+    getDirectories: host.getDirectories?.bind(host),
+    realpath: host.realpath?.bind(host),
+    trace: host.trace?.bind(host),
+    useCaseSensitiveFileNames:
+      typeof host.useCaseSensitiveFileNames === 'function'
+        ? host.useCaseSensitiveFileNames.bind(host)
+        : host.useCaseSensitiveFileNames,
+  };
+}
+
+/**
+ * Lists candidate paths where module resolution looks for `specifier` from `containingFile`,
+ * outside the TypeScript program, by running a deliberately failing lookup with `marker`.
+ */
+export function getFailedModuleLookupLocations(
+  specifier: string,
+  containingFile: string,
+  options: ts.CompilerOptions,
+  lookupHost: ts.ModuleResolutionHost,
+  marker: string,
+): string[] | undefined {
+  type ResolvedModuleWithFailedLookupLocations = ts.ResolvedModuleWithFailedLookupLocations & {
+    failedLookupLocations?: ReadonlyArray<string>;
+  };
+  const markerTs = marker + '.ts';
+  const failedLookup = ts.resolveModuleName(
+    specifier + marker,
+    containingFile,
+    options,
+    lookupHost,
+  ) as ResolvedModuleWithFailedLookupLocations;
+  return failedLookup.failedLookupLocations
+    ?.filter((candidate) => candidate.endsWith(markerTs))
+    .map((candidate) => candidate.slice(0, -markerTs.length));
+}
+
+/**
  * Source files may become redirects to other source files when their package name and version are
  * identical. TypeScript creates a proxy source file for such source files which has an internal
  * `redirectInfo` property that refers to the original source file.
@@ -222,4 +285,221 @@ export function toUnredirectedSourceFile(sf: ts.SourceFile): ts.SourceFile {
     return sf;
   }
   return redirectInfo.unredirected;
+}
+
+const TYPECHECK_SHIM_SUFFIX = '.ngtypecheck.ts';
+
+function isTypeCheckShimPath(fileName: string): boolean {
+  return fileName.toLowerCase().endsWith(TYPECHECK_SHIM_SUFFIX);
+}
+
+/**
+ * Checks whether `sf` is reachable from at least one non-shim root, library, or type directive in
+ * `program` using TypeScript's internal `getFileIncludeReasons()` map.
+ *
+ * Excludes both `ShimAdapter`-tagged shims (`isShimFile`) and Language Service `.ngtypecheck.ts`
+ * project roots (which do not carry `NgExtension` metadata). Fails closed (`false`) if the
+ * internal API or the target's include reasons are unavailable so a TypeScript API change cannot
+ * silently restore global augmentation leaks.
+ */
+export function isFileIncludedByNonShim(
+  program: ts.Program,
+  sf: ts.SourceFile,
+  isShimFile: (file: ts.SourceFile) => boolean,
+  getCanonicalFileName: (fileName: string) => string,
+  cache?: Map<ts.Path, boolean>,
+): boolean {
+  if (isShimFile(sf) || isTypeCheckShimPath(sf.fileName)) {
+    return false;
+  }
+  const programWithReasons = program as ts.Program & {
+    getFileIncludeReasons?: () => ReadonlyMap<ts.Path, ReadonlyArray<{readonly file?: ts.Path}>>;
+    getSourceFileByPath?: (path: ts.Path) => ts.SourceFile | undefined;
+  };
+  if (typeof programWithReasons.getFileIncludeReasons !== 'function') {
+    return false;
+  }
+  const reasons = programWithReasons.getFileIncludeReasons();
+  const resolvePath = (file: ts.SourceFile): ts.Path =>
+    (file as ts.SourceFile & {path?: ts.Path}).path ??
+    (getCanonicalFileName(file.fileName) as ts.Path);
+  let targetPath = resolvePath(sf);
+  if (!reasons.has(targetPath)) {
+    const unredirected = toUnredirectedSourceFile(sf);
+    const unredirectedPath = resolvePath(unredirected);
+    if (reasons.has(unredirectedPath)) {
+      targetPath = unredirectedPath;
+    }
+  }
+  const cached = cache?.get(targetPath);
+  if (cached !== undefined) {
+    return cached;
+  }
+  if (!reasons.has(targetPath)) {
+    cache?.set(targetPath, false);
+    return false;
+  }
+  const visited = new Set<ts.Path>([targetPath]);
+  const queue: ts.Path[] = [targetPath];
+  let reachableFromNonShim = false;
+  while (queue.length > 0) {
+    const current = queue.shift()!;
+    const currentReasons = reasons.get(current);
+    if (currentReasons === undefined) {
+      continue;
+    }
+    for (const reason of currentReasons) {
+      if (reason.file === undefined) {
+        reachableFromNonShim = true;
+        break;
+      }
+      if (visited.has(reason.file) || isTypeCheckShimPath(reason.file)) {
+        continue;
+      }
+      const parentSf =
+        programWithReasons.getSourceFileByPath?.(reason.file) ?? program.getSourceFile(reason.file);
+      if (
+        parentSf !== undefined &&
+        (isShimFile(parentSf) || isTypeCheckShimPath(parentSf.fileName))
+      ) {
+        continue;
+      }
+      visited.add(reason.file);
+      queue.push(reason.file);
+    }
+    if (reachableFromNonShim) {
+      break;
+    }
+  }
+  cache?.set(targetPath, reachableFromNonShim);
+  return reachableFromNonShim;
+}
+
+/**
+ * Marker attached to Angular's default `NgCompilerHost` cached `resolveModuleNames` wrapper, which
+ * delegates strictly to standard `ts.resolveModuleName`. Any other `resolveModuleNames` or
+ * `resolveModuleNameLiterals` hook is treated as a custom resolver and causes CEM import gating to
+ * fail closed rather than risk disagreeing with or mutating the custom host's resolution behavior.
+ */
+export const NG_STANDARD_MODULE_RESOLVER: unique symbol = Symbol('NG_STANDARD_MODULE_RESOLVER');
+
+export type StandardResolveModuleNames = NonNullable<ts.CompilerHost['resolveModuleNames']> & {
+  [NG_STANDARD_MODULE_RESOLVER]?: true;
+};
+
+export type CemImportReachabilityHost = Pick<ts.CompilerHost, 'getCanonicalFileName'> &
+  Partial<ts.ModuleResolutionHost> &
+  Partial<Pick<ts.CompilerHost, 'resolveModuleNames' | 'resolveModuleNameLiterals'>>;
+
+export type CemImportReachability = 'reachable' | 'gated' | 'unresolved';
+
+/**
+ * Resolves `specifier` from `emittingFile` without mutating any watch/tsserver host resolution
+ * cache and classifies its reachability in `program`:
+ * - `'reachable'`: resolves to a declaration already included in `program` via a non-shim chain.
+ * - `'gated'`: resolves to a TypeScript/declaration file on disk that is not in `program` via
+ *   non-shim files, or could not be verified because the host supplies a custom
+ *   `resolveModuleNameLiterals` / untagged `resolveModuleNames` hook or lacks filesystem hooks.
+ * - `'unresolved'`: does not resolve to any TypeScript declaration (e.g. a JS-only package with no
+ *   `.d.ts` files when `!allowJs`), so the manifest itself remains the full type contract.
+ */
+export function getCemImportReachabilityInProgram(
+  program: ts.Program,
+  compilerHost: CemImportReachabilityHost,
+  emittingFile: string,
+  specifier: string,
+  isShimFile: (file: ts.SourceFile) => boolean,
+  getResolutionCache: () => ts.ModuleResolutionCache,
+  nonShimCache?: Map<ts.Path, boolean>,
+): CemImportReachability {
+  if (compilerHost.resolveModuleNameLiterals !== undefined) {
+    return 'gated';
+  }
+  const isTaggedStandardResolver =
+    compilerHost.resolveModuleNames !== undefined &&
+    Boolean(
+      (compilerHost.resolveModuleNames as StandardResolveModuleNames)[NG_STANDARD_MODULE_RESOLVER],
+    );
+  if (compilerHost.resolveModuleNames !== undefined && !isTaggedStandardResolver) {
+    return 'gated';
+  }
+  if (compilerHost.fileExists === undefined || compilerHost.readFile === undefined) {
+    return 'gated';
+  }
+  const compilerOptions = program.getCompilerOptions();
+  const host = compilerHost as ts.ModuleResolutionHost;
+  // `NgCompilerHost`'s default cached `resolveModuleNames` calls `ts.resolveModuleName` without
+  // an explicit `resolutionMode`; mirror that exact call when that resolver is active, and use
+  // `getImpliedNodeFormatForFile` when TypeScript's built-in resolver is active (no custom hooks).
+  const resolutionMode = isTaggedStandardResolver
+    ? undefined
+    : ts.getImpliedNodeFormatForFile(
+        compilerHost.getCanonicalFileName(emittingFile) as ts.Path,
+        undefined,
+        host,
+        compilerOptions,
+      );
+  const resolvedModule = ts.resolveModuleName(
+    specifier,
+    emittingFile,
+    compilerOptions,
+    host,
+    getResolutionCache(),
+    undefined,
+    resolutionMode,
+  ).resolvedModule;
+  if (resolvedModule === undefined) {
+    return 'unresolved';
+  }
+  const isJsExtension =
+    resolvedModule.extension === ts.Extension.Js ||
+    resolvedModule.extension === ts.Extension.Jsx ||
+    resolvedModule.extension === ts.Extension.Mjs ||
+    resolvedModule.extension === ts.Extension.Cjs;
+  if (
+    isJsExtension &&
+    (!compilerOptions.allowJs ||
+      (resolvedModule.isExternalLibraryImport && (compilerOptions.maxNodeModuleJsDepth ?? 0) === 0))
+  ) {
+    return 'unresolved';
+  }
+  const sf = program.getSourceFile(resolvedModule.resolvedFileName);
+  if (sf === undefined) {
+    return 'gated';
+  }
+  return isFileIncludedByNonShim(
+    program,
+    sf,
+    isShimFile,
+    (fileName) => compilerHost.getCanonicalFileName(fileName),
+    nonShimCache,
+  )
+    ? 'reachable'
+    : 'gated';
+}
+
+/**
+ * Convenience predicate returning whether `specifier` from `emittingFile` is `'reachable'` in
+ * `program` via a non-shim dependency chain.
+ */
+export function isCemImportReachableInProgram(
+  program: ts.Program,
+  compilerHost: CemImportReachabilityHost,
+  emittingFile: string,
+  specifier: string,
+  isShimFile: (file: ts.SourceFile) => boolean,
+  getResolutionCache: () => ts.ModuleResolutionCache,
+  nonShimCache?: Map<ts.Path, boolean>,
+): boolean {
+  return (
+    getCemImportReachabilityInProgram(
+      program,
+      compilerHost,
+      emittingFile,
+      specifier,
+      isShimFile,
+      getResolutionCache,
+      nonShimCache,
+    ) === 'reachable'
+  );
 }

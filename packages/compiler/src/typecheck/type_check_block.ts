@@ -77,6 +77,11 @@ export function generateTypeCheckBlock(
     statements.push(renderBlockStatements(env, hostScope, createHostBindingsBlockGuard()));
   }
 
+  const cemPrelude = tcb.getCemPreludeStatements();
+  if (cemPrelude.length > 0) {
+    statements.unshift(getStatementsBlock(cemPrelude).trimEnd());
+  }
+
   const bodyStr = `{\n${statements.join('\n')}\n}`;
   const funcDeclStr = `function ${name}${typeParamsStr}(${thisParamStr}) ${bodyStr}`;
 

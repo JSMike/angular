@@ -6,6 +6,7 @@
  * found in the LICENSE file at https://angular.dev/license
  */
 
+import {absoluteFrom, getFileSystem} from '@angular/compiler-cli/src/ngtsc/file_system';
 import {ErrorCode, ngErrorCode} from '@angular/compiler-cli/src/ngtsc/diagnostics';
 
 import ts from 'typescript';
@@ -861,6 +862,147 @@ describe('getSuggestedDiagnostics', () => {
 
     const diags = project.getSuggestionDiagnosticsForFile('app.ts');
     expect(diags.length).toBe(0);
+  });
+
+  it('should refresh template diagnostics when a local Custom Elements Manifest changes on disk', () => {
+    const manifestJson = (propType: string) =>
+      JSON.stringify({
+        schemaVersion: '2.1.0',
+        modules: [
+          {
+            kind: 'javascript-module',
+            path: 'ls-el.js',
+            declarations: [
+              {
+                kind: 'class',
+                name: 'LsEl',
+                customElement: true,
+                tagName: 'ls-el',
+                members: [{kind: 'field', name: 'value', type: {text: propType}}],
+              },
+            ],
+          },
+        ],
+      });
+    const project = env.addProject(
+      'cem-ls',
+      {
+        'custom-elements.json': manifestJson('string'),
+        'app.ts': `
+          import {Component} from '@angular/core';
+
+          @Component({
+            template: '<ls-el [value]="val"></ls-el>',
+          })
+          export class AppComponent {
+            val = 'ok';
+          }
+        `,
+      },
+      {customElementsManifests: ['./custom-elements.json']},
+    );
+
+    expect(project.getDiagnosticsForFile('app.ts')).toEqual([]);
+
+    // Edit the manifest on disk without touching `app.ts` and verify LS picks up the change.
+    getFileSystem().writeFile(
+      absoluteFrom(project.getAbsFileName('custom-elements.json')),
+      manifestJson('number'),
+    );
+    const updatedDiags = project.getDiagnosticsForFile('app.ts');
+    expect(updatedDiags.length).toBe(1);
+    expect(ts.flattenDiagnosticMessageText(updatedDiags[0].messageText, ' ')).toContain(
+      "Type 'string' is not assignable to type 'number'",
+    );
+  });
+
+  it('should drop CEM shim imports in Language Service after the last user TS import is removed', () => {
+    const project = env.addProject(
+      'cem-ls-gate',
+      {
+        'node_modules/@pkg/lsleak/package.json': JSON.stringify({
+          name: '@pkg/lsleak',
+          customElements: 'custom-elements.json',
+        }),
+        'node_modules/@pkg/lsleak/custom-elements.json': JSON.stringify({
+          schemaVersion: '2.1.0',
+          modules: [
+            {
+              kind: 'javascript-module',
+              path: 'el.js',
+              declarations: [
+                {
+                  kind: 'class',
+                  name: 'LsLeakEl',
+                  customElement: true,
+                  tagName: 'ls-leak-el',
+                  members: [{kind: 'field', name: 'count', type: {text: 'number'}}],
+                },
+              ],
+              exports: [
+                {
+                  kind: 'custom-element-definition',
+                  name: 'ls-leak-el',
+                  declaration: {name: 'LsLeakEl'},
+                },
+                {kind: 'js', name: 'LsLeakEl', declaration: {name: 'LsLeakEl'}},
+              ],
+            },
+          ],
+        }),
+        'node_modules/@pkg/lsleak/el.d.ts': `
+          declare global {
+            interface Window {
+              __lsCemLeak: number;
+            }
+          }
+          export declare class LsLeakEl extends HTMLElement {
+            count: number;
+            extra: boolean;
+          }
+        `,
+        'main.ts': `export const ready = true;`,
+        'app.ts': `
+          import {Component} from '@angular/core';
+          @Component({
+            template: '<ls-leak-el [count]="1" [extra]="\\'wrong\\'"></ls-leak-el>',
+          })
+          export class AppComponent {}
+        `,
+        'unrelated.ts': `
+          import {Component} from '@angular/core';
+          export const tsLeak: number = window.__lsCemLeak;
+          @Component({template: '{{ win.__lsCemLeak }}'})
+          export class UnrelatedComponent {
+            win = window;
+          }
+        `,
+      },
+      {customElementsManifests: ['@pkg/lsleak']},
+    );
+
+    // Step 1: Absent -> `el.d.ts` is not loaded; gated `[extra]` stays lenient without false
+    // errors and `unrelated.ts` reports TS2339 on `window.__lsCemLeak` in both TS and template.
+    expect(project.getDiagnosticsForFile('app.ts')).toEqual([]);
+    const unrelatedStep1 = project.getDiagnosticsForFile('unrelated.ts');
+    expect(unrelatedStep1.length).toBe(2);
+    expect(unrelatedStep1.every((d) => d.code === 2339)).toBeTrue();
+
+    // Step 2: Add import in `main.ts` without editing `app.ts` -> `app.ts` upgrades to class-backed
+    // TS2322 on `[extra]="'wrong'"` and `unrelated.ts` clears.
+    const mainBuf = project.openFile('main.ts');
+    mainBuf.contents = `import '@pkg/lsleak/el.js';\nexport const ready = true;`;
+    expect(project.getDiagnosticsForFile('app.ts').map((d) => d.code)).toEqual([2322]);
+    expect(project.getDiagnosticsForFile('unrelated.ts')).toEqual([]);
+
+    // Step 3: Remove import from `main.ts` without editing `app.ts` -> LS `.ngtypecheck.ts` root
+    // must NOT keep `el.d.ts` alive; `app.ts` drops back to gated manifest-only and
+    // `window.__lsCemLeak` reports TS2339 again in both TS and template.
+    mainBuf.contents = `export const ready = true;`;
+    expect(project.getDiagnosticsForFile('app.ts')).toEqual([]);
+    const unrelatedStep3 = project.getDiagnosticsForFile('unrelated.ts');
+    expect(unrelatedStep3.length).toBe(2);
+    expect(unrelatedStep3.every((d) => d.code === 2339)).toBeTrue();
   });
 });
 

@@ -11,6 +11,7 @@
 export {ShimAdapter} from './src/adapter';
 export {
   copyFileShimData,
+  getShimActiveCemImports,
   isShim,
   retagAllTsFiles,
   retagTsFile,

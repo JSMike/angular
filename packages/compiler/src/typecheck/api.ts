@@ -10,6 +10,7 @@ import {SchemaMetadata} from '../core';
 import {AbsoluteSourceSpan} from '../expression_parser/ast';
 import {ClassPropertyMapping, ClassPropertyName, InputOrOutput} from '../property_mapping';
 import {BoundTarget, LegacyAnimationTriggerNames, MatchSource} from '../render3/view/t2_api';
+import {CustomElementsManifestIndex} from '../schema/custom_elements_manifest_schema';
 import {TcbExpr} from './ops/codegen';
 
 export interface TypeCtorMetadata {
@@ -150,6 +151,17 @@ export interface TcbTypeCheckBlockMetadata {
 export type TypeCheckId = string & {__brand: 'TypeCheckId'};
 
 /**
+ * Result of checking whether a Custom Elements Manifest `import(...)` specifier can be emitted into
+ * a type-check block without pulling new files into the TypeScript program:
+ * - `'reachable'`: resolves to a declaration already included in the program via non-shim files.
+ * - `'gated'`: resolves to a declaration on disk (or could not be verified due to a custom
+ *   resolver hook), so emitting `import(...)` is withheld to preserve program isolation.
+ * - `'unresolved'`: does not resolve to any TypeScript declaration (e.g. a JS-only package with no
+ *   `.d.ts` files), so the manifest itself remains the full type contract.
+ */
+export type CemImportReachability = 'reachable' | 'gated' | 'unresolved';
+
+/**
  * Interface representing the environment needed for TCB generation.
  * This allows us to avoid depending on the full `Environment` class from `compiler-cli`
  * which depends on TypeScript APIs.
@@ -161,6 +173,17 @@ export interface TcbEnvironment {
   pipeInst(pipeMeta: TcbPipeMetadata): TcbExpr;
   typeCtorFor(dir: TcbDirectiveMetadata): TcbExpr;
   getPreludeStatements(): TcbExpr[];
+  /** Optional hook to hoist a Custom Elements Manifest helper declaration to module level. */
+  hoistCemHelper?(name: string, declaration: string): void;
+  /** Optional hook to hoist a deduplicated Custom Elements Manifest type alias to module level. */
+  hoistCemAlias?(key: string, prefix: string, typeExpr: string): string;
+  /**
+   * Optional gate returning whether a Custom Elements Manifest `import(...)` specifier resolves to
+   * a declaration already present in the pre-shim TypeScript program (`'reachable'`), a declaration
+   * withheld for isolation (`'gated'`), or no TypeScript declaration (`'unresolved'`). When
+   * omitted, all specifiers are treated as `'reachable'`.
+   */
+  getCemImportReachability?(specifier: string): CemImportReachability;
 }
 
 export interface TypeCheckingConfig {
@@ -301,4 +324,10 @@ export interface TypeCheckingConfig {
    * Whether to check if unknown properties are bound to `<ng-template>`.
    */
   checkTypeOfNgTemplateBindings: boolean;
+
+  /**
+   * Loaded Custom Elements Manifest schemas used to check custom element bindings, attributes,
+   * events, and local references.
+   */
+  customElementsManifestIndex?: CustomElementsManifestIndex | null;
 }

@@ -40,6 +40,12 @@ export class LanguageServiceAdapter implements NgCompilerAdapter {
    */
   private readonly lastReadResourceVersion = new Map<string, string>();
 
+  /**
+   * Map of Custom Elements Manifest resolution dependency paths (resolved manifests, `package.json`
+   * files, and candidate paths that may not exist yet) to their last observed snapshot token.
+   */
+  private readonly lastManifestSnapshot = new Map<AbsoluteFsPath, string | null>();
+
   constructor(private readonly project: ts.server.Project) {
     this.rootDirs = getRootDirs(this, project.getCompilationSettings());
   }
@@ -150,6 +156,61 @@ export class LanguageServiceAdapter implements NgCompilerAdapter {
     }
     return modifiedFiles.size > 0 ? modifiedFiles : undefined;
   }
+
+  /**
+   * Records snapshot tokens for all Custom Elements Manifest resolution dependencies (resolved
+   * manifests, `package.json` files, and candidate paths that may not exist yet) without adding
+   * them as TypeScript project roots.
+   */
+  syncManifestSnapshots(paths: ReadonlySet<AbsoluteFsPath>): void {
+    this.lastManifestSnapshot.clear();
+    for (const filePath of paths) {
+      this.lastManifestSnapshot.set(filePath, this.getManifestSnapshotToken(filePath));
+    }
+  }
+
+  /**
+   * Returns any Custom Elements Manifest dependency paths whose snapshot changed (edited, created,
+   * or deleted) since the last sync.
+   */
+  getModifiedManifestFiles(paths: ReadonlySet<AbsoluteFsPath>): AbsoluteFsPath[] {
+    const modified: AbsoluteFsPath[] = [];
+    for (const filePath of paths) {
+      const prev = this.lastManifestSnapshot.get(filePath);
+      const curr = this.getManifestSnapshotToken(filePath);
+      if (prev !== curr) {
+        modified.push(filePath);
+      }
+    }
+    return modified;
+  }
+
+  private getManifestSnapshotToken(filePath: AbsoluteFsPath): string | null {
+    if (!this.fileExists(filePath)) {
+      return null;
+    }
+    const mtime = this.project.projectService.host.getModifiedTime?.(filePath);
+    if (mtime !== undefined) {
+      return `m:${mtime.getTime()}`;
+    }
+    const content = this.readFile(filePath);
+    if (content === undefined) {
+      return null;
+    }
+    const hash = this.project.projectService.host.createHash?.(content) ?? hashString(content);
+    return `h:${hash}`;
+  }
+}
+
+function hashString(text: string): string {
+  let h1 = 0x811c9dc5;
+  let h2 = 0x811c9dc5;
+  for (let i = 0; i < text.length; i++) {
+    const c = text.charCodeAt(i);
+    h1 = Math.imul(h1 ^ c, 0x01000193);
+    h2 = Math.imul(h2 ^ (c + i), 0x01000193);
+  }
+  return `${(h1 >>> 0).toString(16)}:${(h2 >>> 0).toString(16)}:${text.length}`;
 }
 
 /**

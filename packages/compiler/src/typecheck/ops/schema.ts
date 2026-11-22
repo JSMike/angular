@@ -13,6 +13,7 @@ import {DomElementSchemaRegistry} from '../../schema/dom_element_schema_registry
 import {TcbOp} from './base';
 import {TcbExpr} from './codegen';
 import {Context} from './context';
+import {isValidJsIdentifier} from './custom_elements';
 const REGISTRY = new DomElementSchemaRegistry();
 
 /**
@@ -31,6 +32,7 @@ export class TcbDomSchemaCheckerOp extends TcbOp {
     private element: Element | Template | HostElement,
     private checkElement: boolean,
     private claimedInputs: Set<string> | null,
+    private deepSchemaOnly: boolean = false,
   ) {
     super();
   }
@@ -69,9 +71,27 @@ export class TcbDomSchemaCheckerOp extends TcbOp {
         const propertyName = REGISTRY.getMappedPropName(binding.name);
 
         if (isTemplateElement) {
+          const tagName = this.getTagName(element);
+          const manifestIndex = this.tcb.env.config.customElementsManifestIndex ?? null;
+          // Defer undeclared identifier properties on manifest custom elements to
+          // `TcbUnclaimedInputsOp` so both `HTMLElementTagNameMap` classes (including app-owned
+          // manifests) and package class imports are checked against the real element class in
+          // strict and non-strict modes. Keep `DomSchemaChecker` for `on*` / `:` security checks,
+          // explicitly unbindable manifest properties, and non-identifier binding names (`[a+b]`).
+          if (
+            !this.deepSchemaOnly &&
+            element instanceof Element &&
+            manifestIndex !== null &&
+            manifestIndex.getSchema(tagName) !== null &&
+            !manifestIndex.isUnbindableProperty(tagName, propertyName) &&
+            !REGISTRY.validateProperty(propertyName).error &&
+            isValidJsIdentifier(propertyName)
+          ) {
+            continue;
+          }
           this.tcb.domSchemaChecker.checkTemplateElementProperty(
             this.tcb.id,
-            this.getTagName(element),
+            tagName,
             propertyName,
             binding.sourceSpan,
             this.tcb.schemas,

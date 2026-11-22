@@ -7,6 +7,7 @@
  */
 
 import {
+  CemImportReachability,
   ClassPropertyMapping,
   CssSelector,
   DomSchemaChecker,
@@ -19,6 +20,7 @@ import {
   ParseTemplateOptions,
   R3Identifiers,
   R3TargetBinder,
+  SchemaMetadata,
   SelectorlessMatcher,
   SelectorMatcher,
   TcbComponentMetadata,
@@ -159,7 +161,11 @@ export function tcb(
   template: string,
   declarations: TestDeclaration[] = [],
   config?: Partial<TypeCheckingConfig>,
-  options?: {emitSpans?: boolean},
+  options?: {
+    emitSpans?: boolean;
+    schemas?: SchemaMetadata[];
+    getCemImportReachability?: (specifier: string) => CemImportReachability;
+  },
   templateParserOptions?: ParseTemplateOptions,
   foreignComponents: string[] = [],
 ): string {
@@ -192,7 +198,7 @@ export function tcb(
     id: 'tcb' as TypeCheckId,
     boundTarget,
     pipes: usedPipes,
-    schemas: [],
+    schemas: options?.schemas ?? [],
     isStandalone: false,
     preserveWhitespaces: false,
   };
@@ -206,7 +212,7 @@ export function tcb(
       : typeParameters.map(() => 'any'),
   };
 
-  const env = new TestTcbEnvironment(fullConfig);
+  const env = new TestTcbEnvironment(fullConfig, options?.getCemImportReachability);
   env.addTypeCheckBlock(
     generateTypeCheckBlock(
       env,
@@ -239,11 +245,42 @@ class TestTcbEnvironment implements TcbEnvironment {
   private readonly typeCtorStatements: TcbExpr[] = [];
   private readonly pipeInsts = new Map<TcbReferenceKey, string>();
   private readonly pipeInstStatements: TcbExpr[] = [];
+  private readonly cemHelpers = new Set<string>();
+  private readonly cemHelperStatements: string[] = [];
+  private readonly cemAliases = new Map<string, string>();
+  private readonly cemAliasStatements: string[] = [];
   private readonly tcbStatements: string[] = [];
   private nextTypeCtorId = 1;
   private nextPipeInstId = 1;
+  private nextCemAliasId = 1;
 
-  constructor(readonly config: TypeCheckingConfig) {}
+  constructor(
+    readonly config: TypeCheckingConfig,
+    private readonly cemImportGate?: (specifier: string) => CemImportReachability,
+  ) {}
+
+  getCemImportReachability(specifier: string): CemImportReachability {
+    return this.cemImportGate !== undefined ? this.cemImportGate(specifier) : 'reachable';
+  }
+
+  hoistCemHelper(name: string, declaration: string): void {
+    if (this.cemHelpers.has(name)) {
+      return;
+    }
+    this.cemHelpers.add(name);
+    this.cemHelperStatements.push(declaration);
+  }
+
+  hoistCemAlias(key: string, prefix: string, typeExpr: string): string {
+    const existing = this.cemAliases.get(key);
+    if (existing !== undefined) {
+      return existing;
+    }
+    const alias = `${prefix}${this.nextCemAliasId++}`;
+    this.cemAliases.set(key, alias);
+    this.cemAliasStatements.push(`type ${alias} = ${typeExpr}`);
+    return alias;
+  }
 
   referenceTcbValue(ref: TcbReferenceMetadata): TcbExpr {
     if (ref.unexportedDiagnostic !== null) {
@@ -324,6 +361,9 @@ class TestTcbEnvironment implements TcbEnvironment {
       source += `import * as ${alias} from '${moduleName}';\n`;
     }
     source += '\n';
+    for (const stmt of [...this.cemHelperStatements, ...this.cemAliasStatements]) {
+      source += `${stmt};\n`;
+    }
     for (const expr of [...this.pipeInstStatements, ...this.typeCtorStatements]) {
       source += `${expr.print()};\n`;
     }

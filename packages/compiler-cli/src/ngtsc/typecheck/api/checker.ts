@@ -9,6 +9,7 @@
 import {
   AbsoluteSourceSpan,
   AST,
+  CustomElementsManifestIndex,
   ForeignComponentMeta,
   LiteralPrimitive,
   ParseSourceSpan,
@@ -373,6 +374,12 @@ export interface TemplateTypeChecker {
       sourceFile?: ts.SourceFile;
     }[],
   ): NgTemplateDiagnostic<T>;
+
+  /** Returns the loaded Custom Elements Manifest index, or `null` if none are configured. */
+  getCustomElementsManifestIndex(): CustomElementsManifestIndex | null;
+
+  /** Updates the loaded Custom Elements Manifest index after a resource-only manifest change. */
+  updateCustomElementsManifestIndex(index: CustomElementsManifestIndex | null): void;
 }
 
 /**

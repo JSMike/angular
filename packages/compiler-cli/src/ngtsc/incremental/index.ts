@@ -6,7 +6,7 @@
  * found in the LICENSE file at https://angular.dev/license
  */
 
-export {IncrementalCompilation} from './src/incremental';
+export {haveSameManifestIndex, IncrementalCompilation} from './src/incremental';
 export {NOOP_INCREMENTAL_BUILD} from './src/noop';
 export {
   AnalyzedIncrementalState,
