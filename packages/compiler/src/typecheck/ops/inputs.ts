@@ -18,7 +18,10 @@ import {TcbDirectiveMetadata} from '../api';
 import {TcbOp} from './base';
 import {declareVariable, TcbExpr} from './codegen';
 import {formatCustomElementPropertyAccess, isValidJsIdentifier} from './custom_elements';
-import {CustomElementsManifestIndex} from '../../schema/custom_elements_manifest_schema';
+import {
+  CustomElementsManifestIndex,
+  normalizeCustomElementTagName,
+} from '../../schema/custom_elements_manifest_schema';
 import {DomElementSchemaRegistry} from '../../schema/dom_element_schema_registry';
 const REGISTRY = new DomElementSchemaRegistry();
 import {tcbExpression, unwrapWritableSignal} from './expression';
@@ -362,14 +365,18 @@ export class TcbUnclaimedInputsOp extends TcbOp {
         binding.value,
       );
 
-      const propertyName = REGISTRY.getMappedPropName(binding.name);
+      // The property that the binding sets. Custom Elements Manifest properties keep their exact
+      // names, such as `readonly`. Other names map to DOM properties, such as `readOnly`.
+      const propertyName =
+        manifest !== null && manifest.index.hasProperty(manifest.element.name, binding.name)
+          ? binding.name
+          : REGISTRY.getMappedPropName(binding.name);
 
-      if (
-        manifest !== null &&
-        isPropertyBinding &&
-        binding.name !== 'style' &&
-        binding.name !== 'class'
-      ) {
+      const isStylingBinding =
+        binding.name === 'style' ||
+        (binding.type === BindingType.Property && binding.name === 'class');
+
+      if (manifest !== null && isPropertyBinding && !isStylingBinding) {
         const keySpan = binding.keySpan ?? binding.sourceSpan;
         const property = manifest.index.getProperty(manifest.element.name, propertyName);
         if (property !== null) {
@@ -434,9 +441,11 @@ export class TcbUnclaimedInputsOp extends TcbOp {
 
         if (
           !manifest.index.isUnbindableProperty(manifest.element.name, propertyName) &&
+          !manifest.index.isUnbindableProperty(manifest.element.name, binding.name) &&
           !REGISTRY.validateProperty(propertyName).error &&
           isValidJsIdentifier(propertyName)
         ) {
+          const normalizedTag = normalizeCustomElementTagName(manifest.element.name);
           const isBaseDomProp = REGISTRY.hasProperty('unknown', propertyName, []);
           const hasPermissiveSchema = this.tcb.schemas.some(
             (schema) =>
@@ -449,7 +458,7 @@ export class TcbUnclaimedInputsOp extends TcbOp {
               const rawInfo = this.tcb.getCustomElementRawTypeInfo(manifest.element.name)!;
               const helper = rawInfo.hasGatedClassImport ? '_CemGatedEl' : '_CemEl';
               this.tcb.useCemHelper(helper);
-              const targetType = `${helper}<${rawInfo.alias}, ${TcbExpr.quoteAndEscape(manifest.element.name.toLowerCase())}, ${TcbExpr.quoteAndEscape(propertyName)}>`;
+              const targetType = `${helper}<${rawInfo.alias}, ${TcbExpr.quoteAndEscape(normalizedTag)}, ${TcbExpr.quoteAndEscape(propertyName)}>`;
               this.emitCheckedMemberAssignment(
                 targetType,
                 propertyName,
@@ -477,7 +486,7 @@ export class TcbUnclaimedInputsOp extends TcbOp {
             // omitted from the manifest do not produce false errors in spec/unimported builds.
             const helper = rawInfo.hasGatedClassImport ? '_CemGatedEl' : '_CemEl';
             this.tcb.useCemHelper(helper);
-            targetType = `${helper}<${rawInfo.alias}, ${TcbExpr.quoteAndEscape(manifest.element.name.toLowerCase())}, ${quotedProp}>`;
+            targetType = `${helper}<${rawInfo.alias}, ${TcbExpr.quoteAndEscape(normalizedTag)}, ${quotedProp}>`;
           }
           this.emitCheckedMemberAssignment(
             targetType,

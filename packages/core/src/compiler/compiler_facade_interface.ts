@@ -297,6 +297,7 @@ export interface R3DeclareComponentFacade extends R3DeclareDirectiveFacade {
   changeDetection?: ChangeDetectionStrategy;
   encapsulation?: ViewEncapsulation;
   preserveWhitespaces?: boolean;
+  customElementPropertyNames?: {[tagName: string]: string[]};
 }
 
 export type R3DeclareTemplateDependencyFacade = {

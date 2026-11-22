@@ -1553,10 +1553,14 @@ export class TemplateTypeCheckerImpl implements TemplateTypeChecker {
   }
 
   getPotentialDomBindings(tagName: string): {attribute: string; property: string}[] {
+    const manifestIndex = this.config.customElementsManifestIndex;
     const attributes = this.domSchemaRegistry.allKnownAttributesOfElement(tagName);
     return attributes.map((attribute) => ({
       attribute,
-      property: this.domSchemaRegistry.getMappedPropName(attribute),
+      // Manifest properties keep their names. Other attributes map to their DOM property names.
+      property: manifestIndex?.hasProperty(tagName, attribute)
+        ? attribute
+        : this.domSchemaRegistry.getMappedPropName(attribute),
     }));
   }
 

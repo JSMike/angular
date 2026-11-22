@@ -6,6 +6,14 @@
  * found in the LICENSE file at https://angular.dev/license
  */
 
+/**
+ * Lowercases the ASCII letters of a tag name, as HTML tag matching does. Other characters are kept
+ * because Unicode lowercasing can change a custom element name.
+ */
+export function normalizeCustomElementTagName(tagName: string): string {
+  return tagName.replace(/[A-Z]/g, (char) => char.toLowerCase());
+}
+
 /** A candidate JavaScript module export for a custom element class. */
 export interface CustomElementImportCandidate {
   /** Module specifier to pass to TypeScript `import(...)`. */
@@ -122,7 +130,7 @@ export class CustomElementsManifestIndex {
     this.schemas = schemas;
     const tagNames = new Set<string>();
     for (const schema of schemas) {
-      const tag = schema.tagName.toLowerCase();
+      const tag = normalizeCustomElementTagName(schema.tagName);
       if (this.byTag.has(tag)) {
         continue;
       }
@@ -147,33 +155,38 @@ export class CustomElementsManifestIndex {
   }
 
   getSchema(tagName: string): CustomElementsManifestSchema | null {
-    return this.byTag.get(tagName.toLowerCase())?.schema ?? null;
+    return this.byTag.get(normalizeCustomElementTagName(tagName))?.schema ?? null;
   }
 
   hasProperty(tagName: string, propName: string): boolean {
-    return this.byTag.get(tagName.toLowerCase())?.properties.has(propName) ?? false;
+    return (
+      this.byTag.get(normalizeCustomElementTagName(tagName))?.properties.has(propName) ?? false
+    );
   }
 
   isUnbindableProperty(tagName: string, propName: string): boolean {
-    return this.byTag.get(tagName.toLowerCase())?.unbindableProperties.has(propName) ?? false;
+    return (
+      this.byTag.get(normalizeCustomElementTagName(tagName))?.unbindableProperties.has(propName) ??
+      false
+    );
   }
 
   /** Whether the manifest supplies candidate class imports for `tagName`. */
   hasClassSource(tagName: string): boolean {
-    const entry = this.byTag.get(tagName.toLowerCase());
+    const entry = this.byTag.get(normalizeCustomElementTagName(tagName));
     return entry !== undefined && (entry.schema.classImports?.length ?? 0) > 0;
   }
 
   getProperty(tagName: string, propName: string): CustomElementPropertySchema | null {
-    return this.byTag.get(tagName.toLowerCase())?.properties.get(propName) ?? null;
+    return this.byTag.get(normalizeCustomElementTagName(tagName))?.properties.get(propName) ?? null;
   }
 
   getAttribute(tagName: string, attrName: string): CustomElementAttributeSchema | null {
-    return this.byTag.get(tagName.toLowerCase())?.attributes.get(attrName) ?? null;
+    return this.byTag.get(normalizeCustomElementTagName(tagName))?.attributes.get(attrName) ?? null;
   }
 
   getEvent(tagName: string, eventName: string): CustomElementEventSchema | null {
-    return this.byTag.get(tagName.toLowerCase())?.events.get(eventName) ?? null;
+    return this.byTag.get(normalizeCustomElementTagName(tagName))?.events.get(eventName) ?? null;
   }
 
   hasEventOnAnyElement(eventName: string): boolean {

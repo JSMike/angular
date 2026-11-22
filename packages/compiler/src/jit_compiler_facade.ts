@@ -100,6 +100,7 @@ import type {BoundTarget} from './render3/view/t2_api';
 import {R3TargetBinder} from './render3/view/t2_binder';
 import {makeBindingParser, parseTemplate} from './render3/view/template';
 import {ResourceLoader} from './resource_loader';
+import {normalizeCustomElementTagName} from './schema/custom_elements_manifest_schema';
 import {DomElementSchemaRegistry} from './schema/dom_element_schema_registry';
 import {compileService} from './service_compiler';
 import {getJitChangeDetectionDefaultForVersion, getJitStandaloneDefaultForVersion} from './util';
@@ -701,6 +702,16 @@ function convertDeclareComponentFacadeToMetadata(
 
   const defaultCdStrategy = getJitChangeDetectionDefaultForVersion(decl.version);
 
+  const customElementPropertyNames =
+    decl.customElementPropertyNames !== undefined
+      ? new Map<string, ReadonlySet<string>>(
+          Object.entries(decl.customElementPropertyNames).map(([tagName, propertyNames]) => [
+            normalizeCustomElementTagName(tagName),
+            new Set(propertyNames),
+          ]),
+        )
+      : null;
+
   return {
     ...convertDeclareDirectiveFacadeToMetadata(decl, typeSourceSpan),
     template,
@@ -720,6 +731,7 @@ function convertDeclareComponentFacadeToMetadata(
     legacyOptionalChaining: decl.legacyOptionalChaining ?? LEGACY_OPTIONAL_CHAINING_DEFAULT,
     foreignImports: null,
     enableTemplateSourceLocations: false,
+    customElementPropertyNames,
   };
 }
 

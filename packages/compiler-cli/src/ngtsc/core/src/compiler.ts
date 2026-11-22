@@ -536,7 +536,10 @@ export class NgCompiler {
       new ImportGraph(inputProgram.getTypeChecker(), this.delegatingPerfRecorder),
     );
     this.loadCustomElementsManifestSchemas();
-    this.incrementalCompilation.recordCustomElementsManifestIndex(this.customElementsManifestIndex);
+    this.incrementalCompilation.recordCustomElementsManifestIndex(
+      this.customElementsManifestIndex,
+      inputProgram,
+    );
     this.incrementalStrategy.setIncrementalState(this.incrementalCompilation.state, inputProgram);
 
     this.ignoreForDiagnostics = new Set(
@@ -584,6 +587,7 @@ export class NgCompiler {
         this.loadCustomElementsManifestSchemas();
         this.incrementalCompilation.recordCustomElementsManifestIndex(
           this.customElementsManifestIndex,
+          this.inputProgram,
         );
         if (
           this.compilation !== null &&
@@ -1673,6 +1677,7 @@ export class NgCompiler {
         this.emitDeclarationOnly,
         this.options.legacyOptionalChaining ?? LEGACY_OPTIONAL_CHAINING_DEFAULT,
         this.enableTemplateSourceLocations,
+        () => this.customElementsManifestIndex,
       ),
 
       // TODO(alxhub): understand why the cast here is necessary (something to do with `null`

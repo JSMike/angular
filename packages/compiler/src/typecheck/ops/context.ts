@@ -8,7 +8,10 @@
 
 import {SchemaMetadata} from '../../core';
 import {BoundTarget} from '../../render3/view/t2_api';
-import {CustomElementTypeExpr} from '../../schema/custom_elements_manifest_schema';
+import {
+  CustomElementTypeExpr,
+  normalizeCustomElementTagName,
+} from '../../schema/custom_elements_manifest_schema';
 import {TypeCheckId, TcbDirectiveMetadata, TcbPipeMetadata, TcbEnvironment} from '../api';
 import {OutOfBandDiagnosticRecorder} from '../oob';
 import {DomSchemaChecker} from '../schema';
@@ -126,7 +129,7 @@ export class Context {
     if (index === null) {
       return null;
     }
-    const normalizedTag = tagName.toLowerCase();
+    const normalizedTag = normalizeCustomElementTagName(tagName);
     const existing = this.cemRawTypeAliases.get(normalizedTag);
     if (existing !== undefined) {
       return existing;

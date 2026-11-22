@@ -6,7 +6,10 @@
  * found in the LICENSE file at https://angular.dev/license
  */
 
-import {CustomElementsManifestIndex} from '@angular/compiler';
+import {
+  CustomElementsManifestIndex,
+  haveSameCustomElementsManifestExactPropertyNames,
+} from '@angular/compiler';
 import ts from 'typescript';
 
 import {absoluteFromSourceFile, AbsoluteFsPath, resolve} from '../../file_system';
@@ -86,6 +89,11 @@ export class IncrementalCompilation implements IncrementalBuild<ClassRecord, Fil
   private customElementsManifestIndex: CustomElementsManifestIndex | null = null;
   /** Whether Custom Elements Manifest schemas changed relative to the prior compilation. */
   private customElementsManifestsChanged = false;
+  /**
+   * Whether the set of remapped DOM property names declared by Custom Elements Manifests changed
+   * relative to the prior compilation, requiring JS/partial re-emit of templates.
+   */
+  private customElementsManifestExactPropsChanged = false;
 
   private constructor(
     state: IncrementalState,
@@ -263,8 +271,9 @@ export class IncrementalCompilation implements IncrementalBuild<ClassRecord, Fil
 
     // Determine the set of files which have already been emitted.
     let emitted: Set<AbsoluteFsPath>;
-    if (this.step === null) {
-      // Since there is no prior compilation, no files have yet been emitted.
+    if (this.step === null || this.customElementsManifestExactPropsChanged) {
+      // Since there is no prior compilation, or exact custom element property names changed,
+      // previously emitted files must be re-emitted.
       emitted = new Set();
     } else {
       // Begin with the files emitted by the prior successful compilation, but remove those which we
@@ -304,25 +313,43 @@ export class IncrementalCompilation implements IncrementalBuild<ClassRecord, Fil
   }
 
   /**
-   * Records the Custom Elements Manifest index of this compilation. Because PR #1 emits identical
-   * JS/d.ts output regardless of manifests, a manifest change only invalidates cached template
-   * type-checking results (reusing prior analysis and emit state).
+   * Records the Custom Elements Manifest index of this compilation. Any schema change invalidates
+   * cached template type-checking results; changes to remapped DOM property names (`readonly`,
+   * `tabindex`, `for`, `formaction`, `class`, `innerHtml`) also invalidate cached emit results so
+   * generated property instructions and partial `customElementPropertyNames` metadata are updated.
    */
-  recordCustomElementsManifestIndex(index: CustomElementsManifestIndex | null): void {
+  recordCustomElementsManifestIndex(
+    index: CustomElementsManifestIndex | null,
+    program?: ts.Program,
+  ): void {
     this.customElementsManifestIndex = index;
     if (this._state.kind === IncrementalStateKind.Analyzed) {
-      if (!haveSameManifestIndex(this._state.customElementsManifestIndex, index)) {
+      const priorIndex = this._state.customElementsManifestIndex;
+      if (!haveSameManifestIndex(priorIndex, index)) {
         this._state.typeCheckResults = null;
         this.customElementsManifestsChanged = true;
+        if (!haveSameCustomElementsManifestExactPropertyNames(priorIndex, index)) {
+          this._state.emitted.clear();
+          if (this.phase.kind === PhaseKind.TypeCheckAndEmit && program !== undefined) {
+            for (const sf of program.getSourceFiles()) {
+              if (!sf.isDeclarationFile) {
+                this.phase.needsEmit.add(absoluteFromSourceFile(toOriginalSourceFile(sf)));
+              }
+            }
+          }
+        }
       }
       this._state.customElementsManifestIndex = index;
       return;
     }
-    if (
-      this.step !== null &&
-      !haveSameManifestIndex(this.step.priorState.customElementsManifestIndex, index)
-    ) {
-      this.customElementsManifestsChanged = true;
+    if (this.step !== null) {
+      const priorIndex = this.step.priorState.customElementsManifestIndex;
+      if (!haveSameManifestIndex(priorIndex, index)) {
+        this.customElementsManifestsChanged = true;
+        if (!haveSameCustomElementsManifestExactPropertyNames(priorIndex, index)) {
+          this.customElementsManifestExactPropsChanged = true;
+        }
+      }
     }
   }
 
@@ -405,8 +432,9 @@ export class IncrementalCompilation implements IncrementalBuild<ClassRecord, Fil
   }
 
   safeToSkipEmit(sf: ts.SourceFile): boolean {
-    // If this is a fresh compilation, it's never safe to skip an emit.
-    if (this.step === null) {
+    // If this is a fresh compilation, or remapped custom element property names changed, it's never
+    // safe to skip an emit.
+    if (this.step === null || this.customElementsManifestExactPropsChanged) {
       return false;
     }
 

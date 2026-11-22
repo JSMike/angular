@@ -17,8 +17,11 @@ import {
   Pipe,
   Type,
   ViewEncapsulation,
+  ɵɵFactoryTarget,
   ɵɵngDeclareComponent,
+  ɵɵngDeclareFactory,
 } from '../../../src/core';
+import {TestBed} from '../../../testing';
 
 import {
   AttributeMarker,
@@ -602,6 +605,57 @@ describe('component declaration jit compilation', () => {
     expectComponentDef(def, {
       pipes: [TestPipe, ForwardPipe],
     });
+  });
+
+  it('should preserve customElementPropertyNames when JIT-compiling a partial declaration', async () => {
+    @Directive({selector: '[exactDir]'})
+    class ExactDir {}
+
+    class DeclaredDomOnlyHost {
+      readonly = true;
+      static ɵfac = ɵɵngDeclareFactory({
+        type: DeclaredDomOnlyHost,
+        deps: [],
+        target: ɵɵFactoryTarget.Component,
+      });
+      static ɵcmp = ɵɵngDeclareComponent({
+        version: '22.4.0',
+        type: DeclaredDomOnlyHost,
+        isStandalone: true,
+        template: `<my-element [readonly]="readonly"></my-element>`,
+        isInline: true,
+        customElementPropertyNames: {'my-element': ['readonly']},
+      });
+    }
+
+    class DeclaredFullHost {
+      readonly = true;
+      static ɵfac = ɵɵngDeclareFactory({
+        type: DeclaredFullHost,
+        deps: [],
+        target: ɵɵFactoryTarget.Component,
+      });
+      static ɵcmp = ɵɵngDeclareComponent({
+        version: '22.4.0',
+        type: DeclaredFullHost,
+        isStandalone: true,
+        template: `<my-element exactDir [readonly]="readonly"></my-element>`,
+        isInline: true,
+        dependencies: [{kind: 'directive', type: ExactDir, selector: '[exactDir]'}],
+        customElementPropertyNames: {'my-element': ['readonly']},
+      });
+    }
+
+    for (const HostCmp of [DeclaredDomOnlyHost, DeclaredFullHost]) {
+      const fixture = TestBed.createComponent(HostCmp);
+      await fixture.whenStable();
+      const element = fixture.nativeElement.querySelector('my-element') as HTMLElement & {
+        readonly?: boolean;
+        readOnly?: boolean;
+      };
+      expect(element.readonly).toBe(true);
+      expect(element.readOnly).toBeUndefined();
+    }
   });
 });
 
