@@ -11979,6 +11979,281 @@ runInEachFileSystem((os: string) => {
         );
       });
     });
+
+    describe('custom elements manifest isolation', () => {
+      it('should prune stale CEM shims after multiple consecutive incremental builds that skip template type-checking', () => {
+        const fs = getFileSystem();
+        env.write(
+          'node_modules/@pkg/skip/package.json',
+          JSON.stringify({name: '@pkg/skip', customElements: 'custom-elements.json'}),
+        );
+        env.write(
+          'node_modules/@pkg/skip/custom-elements.json',
+          JSON.stringify({
+            schemaVersion: '2.1.0',
+            modules: [
+              {
+                kind: 'javascript-module',
+                path: 'el.js',
+                declarations: [
+                  {
+                    kind: 'class',
+                    name: 'SkipEl',
+                    customElement: true,
+                    tagName: 'skip-el',
+                    members: [{kind: 'field', name: 'count', type: {text: 'number'}}],
+                  },
+                ],
+                exports: [
+                  {
+                    kind: 'custom-element-definition',
+                    name: 'skip-el',
+                    declaration: {name: 'SkipEl'},
+                  },
+                  {kind: 'js', name: 'SkipEl', declaration: {name: 'SkipEl'}},
+                ],
+              },
+            ],
+          }),
+        );
+        env.write(
+          'node_modules/@pkg/skip/el.d.ts',
+          `
+            declare global {
+              interface Window {
+                __skipCemLeak: number;
+              }
+            }
+            export declare class SkipEl extends HTMLElement {
+              count: number;
+              extra: boolean;
+            }
+          `,
+        );
+        env.write('main.ts', `import '@pkg/skip/el.js';\nexport const ok = true;`);
+        env.write('user.ts', `export const check: number = window.__skipCemLeak;`);
+        env.write(
+          'app.ts',
+          `
+            import {Component} from '@angular/core';
+            @Component({template: '<skip-el [count]="1" [extra]="\\'wrong\\'"></skip-el>'})
+            export class AppCmp {}
+          `,
+        );
+
+        const options: CompilerOptions = {
+          basePath: env.basePath,
+          target: ts.ScriptTarget.Latest,
+          module: ts.ModuleKind.ESNext,
+          moduleResolution: ts.ModuleResolutionKind.Bundler,
+          skipLibCheck: true,
+          strict: true,
+          strictTemplates: true,
+          customElementsManifests: ['@pkg/skip'],
+        };
+        const mainPath = fs.resolve(env.basePath, 'main.ts');
+        const userPath = fs.resolve(env.basePath, 'user.ts');
+        const appPath = fs.resolve(env.basePath, 'app.ts');
+        const roots = [mainPath, userPath, appPath];
+
+        // Build 1: package imported and template type-checked -> shim records active CEM import
+        // and class-backed `[extra]="'wrong'"` fails with TS2322.
+        const p1 = new NgtscProgram(roots, options, createCompilerHost({options}));
+        expect(p1.getTsSemanticDiagnostics()).toEqual([]);
+        const ngDiags1 = p1.getNgSemanticDiagnostics().filter((d) => d.file?.fileName === appPath);
+        expect(ngDiags1.length).toBe(1);
+        expect(ngDiags1[0].code).toBe(2322);
+        expect(ts.flattenDiagnosticMessageText(ngDiags1[0].messageText, ' ')).toContain('boolean');
+
+        // Builds 2 & 3: reuse previous programs and run analysis WITHOUT template type-checking.
+        const p2 = new NgtscProgram(roots, options, createCompilerHost({options}), p1);
+        p2.compiler.getResourceDependencies(p2.getTsProgram().getSourceFile(appPath)!);
+        const p3 = new NgtscProgram(roots, options, createCompilerHost({options}), p2);
+        p3.compiler.getResourceDependencies(p3.getTsProgram().getSourceFile(appPath)!);
+
+        // Build 4: remove the last user import from `main.ts`. The reused shim's active CEM
+        // imports must still be pruned so ordinary TS diagnostics on `user.ts` immediately fail
+        // and `app.ts` drops back to gated manifest-only checking.
+        env.write('main.ts', `export const ok = true;`);
+        const p4 = new NgtscProgram(roots, options, createCompilerHost({options}), p3);
+        const userDiags = p4
+          .getTsSemanticDiagnostics()
+          .filter((d) => d.file?.fileName === userPath);
+        expect(userDiags.length).toBe(1);
+        expect(userDiags[0].code).toBe(2339);
+        expect(ts.flattenDiagnosticMessageText(userDiags[0].messageText, ' ')).toContain(
+          '__skipCemLeak',
+        );
+        const ngDiags4 = p4.getNgSemanticDiagnostics().filter((d) => d.file?.fileName === appPath);
+        expect(ngDiags4).toEqual([]);
+      });
+
+      it('should fail closed when a custom resolver redirects a CEM shim import to an unimported declaration', () => {
+        const fs = getFileSystem();
+        env.write(
+          'node_modules/@pkg/redir/package.json',
+          JSON.stringify({name: '@pkg/redir', customElements: 'custom-elements.json'}),
+        );
+        env.write(
+          'node_modules/@pkg/redir/custom-elements.json',
+          JSON.stringify({
+            schemaVersion: '2.1.0',
+            modules: [
+              {
+                kind: 'javascript-module',
+                path: 'el.js',
+                declarations: [
+                  {
+                    kind: 'class',
+                    name: 'RedirEl',
+                    customElement: true,
+                    tagName: 'redir-el',
+                    members: [{kind: 'field', name: 'count', type: {text: 'number'}}],
+                  },
+                ],
+                exports: [
+                  {
+                    kind: 'custom-element-definition',
+                    name: 'redir-el',
+                    declaration: {name: 'RedirEl'},
+                  },
+                  {kind: 'js', name: 'RedirEl', declaration: {name: 'RedirEl'}},
+                ],
+              },
+            ],
+          }),
+        );
+        env.write(
+          'node_modules/@pkg/redir/el.d.ts',
+          `
+            export declare class RedirEl extends HTMLElement {
+              count: number;
+              extra: boolean;
+            }
+          `,
+        );
+        env.write(
+          'node_modules/@pkg/redir/alternate.d.ts',
+          `
+            declare global {
+              interface Window {
+                __altRedirectLeak: number;
+              }
+            }
+            export declare class RedirEl extends HTMLElement {
+              count: number;
+              extra: boolean;
+            }
+          `,
+        );
+        env.write('main.ts', `import '@pkg/redir/el.js';\nexport const ok = true;`);
+        env.write('user.ts', `export const check: number = window.__altRedirectLeak;`);
+        env.write(
+          'app.ts',
+          `
+            import {Component} from '@angular/core';
+            @Component({template: '<redir-el [count]="\\'bad\\'" [extra]="\\'wrong\\'"></redir-el>'})
+            export class AppCmp {}
+          `,
+        );
+
+        const options: CompilerOptions = {
+          basePath: env.basePath,
+          target: ts.ScriptTarget.Latest,
+          module: ts.ModuleKind.ESNext,
+          moduleResolution: ts.ModuleResolutionKind.Bundler,
+          skipLibCheck: true,
+          strict: true,
+          strictTemplates: true,
+          customElementsManifests: ['@pkg/redir'],
+        };
+        const mainPath = fs.resolve(env.basePath, 'main.ts');
+        const userPath = fs.resolve(env.basePath, 'user.ts');
+        const appPath = fs.resolve(env.basePath, 'app.ts');
+        const alternatePath = fs.resolve(env.basePath, 'node_modules/@pkg/redir/alternate.d.ts');
+        const roots = [mainPath, userPath, appPath];
+
+        for (const hookKind of ['resolveModuleNameLiterals', 'resolveModuleNames'] as const) {
+          const host = createCompilerHost({options});
+          if (hookKind === 'resolveModuleNameLiterals') {
+            host.resolveModuleNameLiterals = (literals, containingFile, redirectedRef, opts) =>
+              literals.map((lit) => {
+                if (containingFile.endsWith('.ngtypecheck.ts') && lit.text === '@pkg/redir/el.js') {
+                  return {
+                    resolvedModule: {
+                      resolvedFileName: alternatePath,
+                      extension: ts.Extension.Dts,
+                      isExternalLibraryImport: true,
+                    },
+                  };
+                }
+                return ts.resolveModuleName(
+                  lit.text,
+                  containingFile,
+                  opts,
+                  host,
+                  undefined,
+                  redirectedRef,
+                );
+              });
+          } else {
+            host.resolveModuleNames = (names, containingFile, _reused, redirectedRef, opts) =>
+              names.map((name) => {
+                if (containingFile.endsWith('.ngtypecheck.ts') && name === '@pkg/redir/el.js') {
+                  return {
+                    resolvedFileName: alternatePath,
+                    extension: ts.Extension.Dts,
+                    isExternalLibraryImport: true,
+                  };
+                }
+                return ts.resolveModuleName(
+                  name,
+                  containingFile,
+                  opts,
+                  host,
+                  undefined,
+                  redirectedRef,
+                ).resolvedModule;
+              });
+          }
+
+          const program = new NgtscProgram(roots, options, host);
+          const ngDiags = program.getNgSemanticDiagnostics();
+          const tsDiags = program.getTsSemanticDiagnostics();
+
+          // `alternate.d.ts` must never enter the type-check program via the shim.
+          expect(
+            program.compiler
+              .getCurrentProgram()
+              .getSourceFiles()
+              .some((sf) => sf.fileName === alternatePath),
+          )
+            .withContext(`${hookKind}: alternate.d.ts should not enter type-check program`)
+            .toBeFalse();
+
+          // Ordinary TS diagnostics must still report TS2339 on `__altRedirectLeak`.
+          const userDiags = tsDiags.filter((d) => d.file?.fileName === userPath);
+          expect(userDiags.length).withContext(`${hookKind}: user.ts diagnostic count`).toBe(1);
+          expect(userDiags[0].code).toBe(2339);
+          expect(ts.flattenDiagnosticMessageText(userDiags[0].messageText, ' ')).toContain(
+            '__altRedirectLeak',
+          );
+
+          // Template still gets manifest-inline checking (`count`: TS2322) while class-only
+          // `extra` stays gated out (no class-backed TS2322 or false TS2339).
+          const appDiags = ngDiags.filter((d) => d.file?.fileName === appPath);
+          const appTexts = appDiags.map((d) => ({
+            code: d.code,
+            text: ts.flattenDiagnosticMessageText(d.messageText, ' '),
+          }));
+          expect(appTexts.length).withContext(`${hookKind}: app diagnostic count`).toBe(1);
+          expect(appTexts[0].code).withContext(`${hookKind}: manifest count check`).toBe(2322);
+          expect(appTexts[0].text)
+            .withContext(`${hookKind}: manifest count message`)
+            .toContain("'number'");
+        }
+      });
+    });
   });
 
   function expectTokenAtPosition<T extends ts.Node>(

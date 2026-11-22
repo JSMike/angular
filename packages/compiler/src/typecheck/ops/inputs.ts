@@ -6,7 +6,9 @@
  * found in the LICENSE file at https://angular.dev/license
  */
 
-import {AST, BindingType} from '../../expression_parser/ast';
+import {CUSTOM_ELEMENTS_SCHEMA, NO_ERRORS_SCHEMA} from '../../core';
+import {AST, ASTWithSource, BindingType, Interpolation} from '../../expression_parser/ast';
+import {ParseSourceSpan} from '../../parse_util';
 import {BindingPropertyName, ClassPropertyName} from '../../property_mapping';
 import {Identifiers as R3Identifiers} from '../../render3/r3_identifiers';
 import {BoundAttribute, Element, Template} from '../../render3/r3_ast';
@@ -15,6 +17,8 @@ import type {Scope} from './scope';
 import {TcbDirectiveMetadata} from '../api';
 import {TcbOp} from './base';
 import {declareVariable, TcbExpr} from './codegen';
+import {formatCustomElementPropertyAccess, isValidJsIdentifier} from './custom_elements';
+import {CustomElementsManifestIndex} from '../../schema/custom_elements_manifest_schema';
 import {DomElementSchemaRegistry} from '../../schema/dom_element_schema_registry';
 const REGISTRY = new DomElementSchemaRegistry();
 import {tcbExpression, unwrapWritableSignal} from './expression';
@@ -277,6 +281,70 @@ export class TcbUnclaimedInputsOp extends TcbOp {
     // `this.inputs` contains only those bindings not matched by any directive. These bindings go to
     // the element itself.
     let elId: TcbExpr | null = null;
+    const manifest = this.getManifestElement();
+
+    if (manifest !== null && this.tcb.env.config.checkTypeOfAttributes) {
+      // Check static attribute values against string-literal unions (from the manifest or inferred
+      // from the element class via `_CemAttr`). Non-string types degrade to `string` because CEM
+      // does not define how attribute strings coerce to other types.
+      for (const attribute of manifest.element.attributes) {
+        if (this.claimedInputs?.has(attribute.name)) {
+          continue;
+        }
+        const attrSchema = manifest.index.getAttribute(manifest.element.name, attribute.name);
+        if (attrSchema === null) {
+          continue;
+        }
+        const keySpan = attribute.keySpan ?? attribute.sourceSpan;
+        const valueExpr = translateInput(attribute.value, this.tcb, this.scope)
+          .wrapForTypeChecker()
+          .addParseSpanInfo(attribute.sourceSpan);
+        if (attrSchema.checkType !== undefined) {
+          if (attrSchema.checkTypeIsLiteralUnion && typeof attrSchema.checkType === 'string') {
+            this.emitCheckedAssignment(
+              attrSchema.checkType,
+              keySpan,
+              valueExpr,
+              attribute.sourceSpan,
+            );
+          } else {
+            const alias = this.tcb.allocateCemTypeAlias(attrSchema.checkType);
+            if (alias === null) {
+              if (attrSchema.property !== undefined) {
+                this.tcb.useCemHelper('_CemAttr');
+                const rawAlias = this.tcb.getCustomElementRawTypeAlias(manifest.element.name)!;
+                const checkType = this.tcb.allocateCemTypeAlias(
+                  `_CemAttr<${rawAlias}, ${TcbExpr.quoteAndEscape(attrSchema.property)}>`,
+                )!;
+                this.emitCheckedAssignment(checkType, keySpan, valueExpr, attribute.sourceSpan);
+              }
+              continue;
+            }
+            this.tcb.useCemHelper('_CemAttrValues');
+            let checkExpr: string;
+            if (attrSchema.property !== undefined) {
+              this.tcb.useCemHelper('_CemAttr');
+              const rawAlias = this.tcb.getCustomElementRawTypeAlias(manifest.element.name)!;
+              const classAttr = `_CemAttr<${rawAlias}, ${TcbExpr.quoteAndEscape(attrSchema.property)}>`;
+              checkExpr = attrSchema.checkTypeUsesUnreferencedGlobal
+                ? classAttr
+                : `[unknown] extends [${alias}] ? ${classAttr} : _CemAttrValues<Exclude<${alias}, undefined | null>>`;
+            } else {
+              checkExpr = `[unknown] extends [${alias}] ? string : _CemAttrValues<Exclude<${alias}, undefined | null>>`;
+            }
+            const checkType = this.tcb.allocateCemTypeAlias(checkExpr)!;
+            this.emitCheckedAssignment(checkType, keySpan, valueExpr, attribute.sourceSpan);
+          }
+        } else if (attrSchema.property !== undefined) {
+          this.tcb.useCemHelper('_CemAttr');
+          const rawAlias = this.tcb.getCustomElementRawTypeAlias(manifest.element.name)!;
+          const checkType = this.tcb.allocateCemTypeAlias(
+            `_CemAttr<${rawAlias}, ${TcbExpr.quoteAndEscape(attrSchema.property)}>`,
+          )!;
+          this.emitCheckedAssignment(checkType, keySpan, valueExpr, attribute.sourceSpan);
+        }
+      }
+    }
 
     // TODO(alxhub): this could be more efficient.
     for (const binding of this.inputs) {
@@ -294,13 +362,140 @@ export class TcbUnclaimedInputsOp extends TcbOp {
         binding.value,
       );
 
+      const propertyName = REGISTRY.getMappedPropName(binding.name);
+
+      if (
+        manifest !== null &&
+        isPropertyBinding &&
+        binding.name !== 'style' &&
+        binding.name !== 'class'
+      ) {
+        const keySpan = binding.keySpan ?? binding.sourceSpan;
+        const property = manifest.index.getProperty(manifest.element.name, propertyName);
+        if (property !== null) {
+          if (!this.tcb.env.config.checkTypeOfInputBindings) {
+            this.scope.addStatement(expr);
+            continue;
+          }
+          const checkedExpression = this.prepareCheckedManifestValue(binding, expr);
+          if (
+            property.checkType !== undefined &&
+            !property.checkTypeIsExternal &&
+            typeof property.checkType === 'string'
+          ) {
+            this.emitCheckedAssignment(
+              property.checkType,
+              keySpan,
+              checkedExpression,
+              binding.sourceSpan,
+            );
+          } else {
+            const rawInfo = this.tcb.getCustomElementRawTypeInfo(manifest.element.name)!;
+            const quotedProp = TcbExpr.quoteAndEscape(propertyName);
+            // When a package manifest's class imports were gated out (e.g. `tsconfig.spec.json`
+            // without a side-effect import of the package), skip manifest types that name an
+            // unreferenced global (such as `Selection`) so DOM global collisions do not cause
+            // false errors; still check via `HTMLElementTagNameMap` if declared.
+            const skipUnreferencedGlobal =
+              Boolean(property.checkTypeUsesUnreferencedGlobal) && rawInfo.hasGatedClassImport;
+            const alias =
+              !skipUnreferencedGlobal && property.checkType !== undefined
+                ? this.tcb.allocateCemTypeAlias(property.checkType)
+                : null;
+            if (alias !== null) {
+              const helper = property.checkTypeUsesUnreferencedGlobal
+                ? '_CemClassOrManifest'
+                : '_CemManifestOrClass';
+              this.tcb.useCemHelper(helper);
+              const targetType =
+                helper === '_CemClassOrManifest'
+                  ? `_CemClassOrManifest<${rawInfo.alias}, ${quotedProp}, ${alias}>`
+                  : `_CemManifestOrClass<${alias}, ${rawInfo.alias}, ${quotedProp}>`;
+              this.emitCheckedMemberAssignment(
+                targetType,
+                propertyName,
+                keySpan,
+                checkedExpression,
+                binding.sourceSpan,
+              );
+            } else {
+              this.tcb.useCemHelper('_CemPropTarget');
+              this.emitCheckedMemberAssignment(
+                `_CemPropTarget<${rawInfo.alias}, ${quotedProp}>`,
+                propertyName,
+                keySpan,
+                checkedExpression,
+                binding.sourceSpan,
+              );
+            }
+          }
+          continue;
+        }
+
+        if (
+          !manifest.index.isUnbindableProperty(manifest.element.name, propertyName) &&
+          !REGISTRY.validateProperty(propertyName).error &&
+          isValidJsIdentifier(propertyName)
+        ) {
+          const isBaseDomProp = REGISTRY.hasProperty('unknown', propertyName, []);
+          const hasPermissiveSchema = this.tcb.schemas.some(
+            (schema) =>
+              schema.name === CUSTOM_ELEMENTS_SCHEMA.name || schema.name === NO_ERRORS_SCHEMA.name,
+          );
+          if (!this.tcb.env.config.checkTypeOfInputBindings) {
+            // In non-strict/basic modes, check property existence (and writability) against the
+            // resolved class without checking the bound value type.
+            if (!hasPermissiveSchema && !isBaseDomProp) {
+              const rawInfo = this.tcb.getCustomElementRawTypeInfo(manifest.element.name)!;
+              const helper = rawInfo.hasGatedClassImport ? '_CemGatedEl' : '_CemEl';
+              this.tcb.useCemHelper(helper);
+              const targetType = `${helper}<${rawInfo.alias}, ${TcbExpr.quoteAndEscape(manifest.element.name.toLowerCase())}, ${TcbExpr.quoteAndEscape(propertyName)}>`;
+              this.emitCheckedMemberAssignment(
+                targetType,
+                propertyName,
+                keySpan,
+                new TcbExpr('(null! as any)'),
+                binding.sourceSpan,
+              );
+            }
+            this.scope.addStatement(expr);
+            continue;
+          }
+          const checkedExpression = this.prepareCheckedManifestValue(binding, expr);
+          const rawInfo = this.tcb.getCustomElementRawTypeInfo(manifest.element.name)!;
+          const quotedProp = TcbExpr.quoteAndEscape(propertyName);
+          let targetType: string;
+          if (isBaseDomProp && !this.tcb.env.config.checkTypeOfDomBindings) {
+            this.tcb.useCemHelper('_CemDomPropTarget');
+            targetType = `_CemDomPropTarget<${rawInfo.alias}, ${quotedProp}>`;
+          } else if (hasPermissiveSchema) {
+            this.tcb.useCemHelper('_CemPropTarget');
+            targetType = `_CemPropTarget<${rawInfo.alias}, ${quotedProp}>`;
+          } else {
+            // When a package manifest's class imports were gated out, allow undeclared properties
+            // unless `HTMLElementTagNameMap` resolves the class so inherited base-class members
+            // omitted from the manifest do not produce false errors in spec/unimported builds.
+            const helper = rawInfo.hasGatedClassImport ? '_CemGatedEl' : '_CemEl';
+            this.tcb.useCemHelper(helper);
+            targetType = `${helper}<${rawInfo.alias}, ${TcbExpr.quoteAndEscape(manifest.element.name.toLowerCase())}, ${quotedProp}>`;
+          }
+          this.emitCheckedMemberAssignment(
+            targetType,
+            propertyName,
+            keySpan,
+            checkedExpression,
+            binding.sourceSpan,
+          );
+          continue;
+        }
+      }
+
       if (this.tcb.env.config.checkTypeOfDomBindings && isPropertyBinding) {
         if (binding.name !== 'style' && binding.name !== 'class') {
           if (elId === null) {
             elId = this.scope.resolve(this.target);
           }
           // A direct binding to a property.
-          const propertyName = REGISTRY.getMappedPropName(binding.name);
           const stmt = new TcbExpr(
             `${elId.print()}[${TcbExpr.quoteAndEscape(propertyName)}] = ${expr.wrapForTypeChecker().print()}`,
           ).addParseSpanInfo(binding.sourceSpan);
@@ -318,4 +513,66 @@ export class TcbUnclaimedInputsOp extends TcbOp {
 
     return null;
   }
+
+  private prepareCheckedManifestValue(binding: BoundAttribute, expr: TcbExpr): TcbExpr {
+    let checkedExpression = expr.wrapForTypeChecker();
+    if (binding.type === BindingType.TwoWay && this.tcb.env.config.allowSignalsInTwoWayBindings) {
+      checkedExpression = unwrapWritableSignal(checkedExpression, this.tcb);
+    }
+    if (isInterpolation(binding.value)) {
+      // Type interpolation as `string`. Otherwise TypeScript can infer a literal union from
+      // the target type for an expression such as `"" + ctx.variant`.
+      checkedExpression = new TcbExpr(`(${checkedExpression.print()}) as string`).addParseSpanInfo(
+        binding.value.sourceSpan,
+      );
+    }
+    return checkedExpression;
+  }
+
+  private getManifestElement(): {index: CustomElementsManifestIndex; element: Element} | null {
+    const index = this.tcb.env.config.customElementsManifestIndex ?? null;
+    return index !== null &&
+      this.target instanceof Element &&
+      index.getSchema(this.target.name) !== null
+      ? {index, element: this.target}
+      : null;
+  }
+
+  private emitCheckedAssignment(
+    checkType: string,
+    keySpan: ParseSourceSpan,
+    value: TcbExpr,
+    sourceSpan: ParseSourceSpan,
+  ): void {
+    const id = new TcbExpr(this.tcb.allocateId());
+    this.scope.addStatement(declareVariable(id, new TcbExpr(`(${checkType})`)));
+    const target = new TcbExpr(id.print(true)).addParseSpanInfo(keySpan);
+    this.scope.addStatement(
+      new TcbExpr(`${target.print()} = ${value.print()}`).addParseSpanInfo(sourceSpan),
+    );
+  }
+
+  private emitCheckedMemberAssignment(
+    targetType: string,
+    member: string,
+    keySpan: ParseSourceSpan,
+    value: TcbExpr,
+    sourceSpan: ParseSourceSpan,
+  ): void {
+    const id = new TcbExpr(this.tcb.allocateId());
+    this.scope.addStatement(declareVariable(id, new TcbExpr(`(${targetType})`)));
+    const target = new TcbExpr(
+      formatCustomElementPropertyAccess(id.print(true), member),
+    ).addParseSpanInfo(keySpan);
+    this.scope.addStatement(
+      new TcbExpr(`${target.print()} = ${value.print()}`).addParseSpanInfo(sourceSpan),
+    );
+  }
+}
+
+function isInterpolation(value: AST): boolean {
+  return (
+    value instanceof Interpolation ||
+    (value instanceof ASTWithSource && value.ast instanceof Interpolation)
+  );
 }

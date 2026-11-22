@@ -15,7 +15,13 @@ import {isShim, ShimAdapter, ShimReferenceTagger} from '../../shims';
 import {PerFileShimGenerator, TopLevelShimGenerator} from '../../shims/api';
 import {TypeCheckShimGenerator} from '../../typecheck';
 import {normalizeSeparators} from '../../util/src/path';
-import {getRootDirs, isNonDeclarationTsPath, RequiredDelegations} from '../../util/src/typescript';
+import {
+  getRootDirs,
+  isNonDeclarationTsPath,
+  NG_STANDARD_MODULE_RESOLVER,
+  RequiredDelegations,
+  StandardResolveModuleNames,
+} from '../../util/src/typescript';
 import {
   ExtendedTsCompilerHost,
   NgCompilerAdapter,
@@ -138,6 +144,7 @@ export class NgCompilerHost
   extends DelegatingCompilerHost
   implements RequiredDelegations<ExtendedTsCompilerHost>, ExtendedTsCompilerHost, NgCompilerAdapter
 {
+  readonly resourceResolutionHost: ExtendedTsCompilerHost;
   readonly entryPoint: AbsoluteFsPath | null = null;
   readonly constructionDiagnostics: ts.Diagnostic[];
 
@@ -155,12 +162,13 @@ export class NgCompilerHost
   ) {
     super(delegate);
 
+    this.resourceResolutionHost = delegate;
     this.entryPoint = entryPoint;
     this.constructionDiagnostics = diagnostics;
     this.inputFiles = [...inputFiles, ...shimAdapter.extraInputFiles];
     this.rootDirs = rootDirs;
 
-    if (this.resolveModuleNames === undefined) {
+    if (this.resolveModuleNames === undefined && this.resolveModuleNameLiterals === undefined) {
       // In order to reuse the module resolution cache during the creation of the type-check
       // program, we'll need to provide `resolveModuleNames` if the delegate did not provide one.
       this.resolveModuleNames = this.createCachedResolveModuleNamesFunction();
@@ -201,6 +209,7 @@ export class NgCompilerHost
     inputFiles: ReadonlyArray<string>,
     options: NgCompilerOptions,
     oldProgram: ts.Program | null,
+    excludedPriorShims?: ReadonlySet<AbsoluteFsPath>,
   ): NgCompilerHost {
     const topLevelShimGenerators: TopLevelShimGenerator[] = [];
     const perFileShimGenerators: PerFileShimGenerator[] = [];
@@ -258,6 +267,7 @@ export class NgCompilerHost
       topLevelShimGenerators,
       perFileShimGenerators,
       oldProgram,
+      excludedPriorShims,
     );
     const shimTagger = new ShimReferenceTagger(
       perFileShimGenerators.map((gen) => gen.extensionPrefix),
@@ -338,13 +348,19 @@ export class NgCompilerHost
     return this.fileNameToModuleName !== undefined ? (this as UnifiedModulesHost) : null;
   }
 
-  private createCachedResolveModuleNamesFunction(): ts.CompilerHost['resolveModuleNames'] {
+  private createCachedResolveModuleNamesFunction(): StandardResolveModuleNames {
     const moduleResolutionCache = ts.createModuleResolutionCache(
       this.getCurrentDirectory(),
       this.getCanonicalFileName.bind(this),
     );
 
-    return (moduleNames, containingFile, reusedNames, redirectedReference, options) => {
+    const resolveModuleNames: StandardResolveModuleNames = (
+      moduleNames,
+      containingFile,
+      reusedNames,
+      redirectedReference,
+      options,
+    ) => {
       return moduleNames.map((moduleName) => {
         const module = ts.resolveModuleName(
           moduleName,
@@ -357,5 +373,7 @@ export class NgCompilerHost
         return module.resolvedModule;
       });
     };
+    resolveModuleNames[NG_STANDARD_MODULE_RESOLVER] = true;
+    return resolveModuleNames;
   }
 }

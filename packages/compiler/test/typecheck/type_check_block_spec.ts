@@ -6,7 +6,11 @@
  * found in the LICENSE file at https://angular.dev/license
  */
 
-import {TypeCheckingConfig} from '../../src/compiler';
+import {
+  CUSTOM_ELEMENTS_SCHEMA,
+  CustomElementsManifestIndex,
+  TypeCheckingConfig,
+} from '../../src/compiler';
 import {ALL_ENABLED_CONFIG, tcb, TestDeclaration, TestDirective} from './util';
 
 describe('type check blocks', () => {
@@ -2739,6 +2743,321 @@ describe('type check blocks', () => {
       );
       expect(block).toContain('var _t2 = null! as i0.FormField;');
       expect(block).toContain('_t2.field = (((this).f));');
+    });
+  });
+
+  describe('custom elements manifest', () => {
+    it('should not emit any _Cem helpers when no manifest elements are used', () => {
+      const index = new CustomElementsManifestIndex([
+        {
+          tagName: 'my-button',
+          properties: [{name: 'variant', checkType: '"a" | "b"'}],
+          attributes: [],
+          events: [],
+        },
+      ]);
+      const block = tcb('<div>hello</div>', [], {customElementsManifestIndex: index});
+      expect(block).not.toContain('_Cem');
+    });
+
+    it('should emit only referenced helpers and deduplicate repeated type aliases', () => {
+      const index = new CustomElementsManifestIndex([
+        {
+          tagName: 'tag-box',
+          properties: [
+            {
+              name: 'variant',
+              checkType: 'import("@pkg/tag.js").TagVariant',
+              checkTypeIsExternal: true,
+            },
+          ],
+          attributes: [
+            {
+              name: 'variant',
+              checkType: 'import("@pkg/tag.js").TagVariant',
+              checkTypeIsExternal: true,
+              property: 'variant',
+            },
+          ],
+          events: [],
+          classImports: [{specifier: '@pkg/tag.js', exportName: 'TagBox'}],
+          isPackageManifest: true,
+        },
+      ]);
+
+      const block = tcb(
+        '<tag-box variant="info"></tag-box><tag-box variant="success"></tag-box>',
+        [],
+        {customElementsManifestIndex: index},
+      );
+      expect(block).toContain('type _CemAttrValues<V>');
+      expect(block).toContain('type _CemAttr<T, K extends string>');
+      expect(block).toContain('type _CemTag<');
+      expect(block).not.toContain('type _CemEv<');
+      expect(block).not.toContain('type _CemEl<');
+      // `import("@pkg/tag.js").TagVariant` should only be aliased once.
+      const importMatches = block.match(/import\("@pkg\/tag\.js"\)\.TagVariant/g) ?? [];
+      expect(importMatches.length).toBe(1);
+    });
+
+    it('should emit _CemTag with _CemFirst fallback, _CemEl with tag name, and _CemEv without LS statements', () => {
+      const index = new CustomElementsManifestIndex([
+        {
+          tagName: 'sl-button',
+          properties: [],
+          attributes: [],
+          events: [
+            {
+              name: 'sl-focus',
+              checkType: 'globalThis.CustomEvent<string>',
+              checkTypeIsExternal: true,
+              checkTypeUsesUnreferencedGlobal: true,
+            },
+          ],
+          classImports: [
+            {specifier: '@shoelace/btn.js', exportName: 'SlButton'},
+            {specifier: '@shoelace/dist/btn.js', exportName: 'SlButton'},
+          ],
+          isPackageManifest: true,
+        },
+      ]);
+
+      const block = tcb(
+        '<sl-button #btn [extra]="v" (sl-focus)="onFocus($event)"></sl-button>{{ btn }}',
+        [],
+        {customElementsManifestIndex: index},
+      );
+      expect(block).toContain('type _CemTag<');
+      expect(block).toContain('type _CemFirst<');
+      expect(block).toContain('interface _CemUnresolvedElement<Tag extends string>');
+      expect(block).toContain(
+        'type _CemEl<T, Tag extends string, K extends string = never, H = globalThis.HTMLElement>',
+      );
+      expect(block).toContain('type _CemEv<');
+      expect(block).toContain(
+        '_CemFirst<import("@shoelace/btn.js").SlButton, import("@shoelace/dist/btn.js").SlButton>',
+      );
+      expect(block).toContain('_CemEl<_CemRaw_1, "sl-button">');
+      expect(block).toContain('_CemEl<_CemRaw_1, "sl-button", "extra">');
+      expect(block).not.toContain('document.addEventListener;');
+      expect(block).toContain('($event: _CemEv<_CemT_');
+    });
+
+    it('should prefer class-first for unreferenced globals and manifest-first for explicit references', () => {
+      const index = new CustomElementsManifestIndex([
+        {
+          tagName: 'my-grid',
+          properties: [
+            {
+              name: 'selection',
+              checkType: 'globalThis.Selection',
+              checkTypeIsExternal: true,
+              checkTypeUsesUnreferencedGlobal: true,
+            },
+            {
+              name: 'mode',
+              checkType: 'import("@pkg/grid.js").GridMode',
+              checkTypeIsExternal: true,
+            },
+          ],
+          attributes: [],
+          events: [],
+          classImports: [{specifier: '@pkg/grid.js', exportName: 'MyGrid'}],
+          isPackageManifest: true,
+        },
+      ]);
+
+      const block = tcb('<my-grid [selection]="sel" [mode]="m"></my-grid>', [], {
+        customElementsManifestIndex: index,
+      });
+      expect(block).toContain('type _CemClassOrManifest<');
+      expect(block).toContain('type _CemManifestOrClass<');
+      expect(block).toContain('_CemClassOrManifest<_CemRaw_');
+      expect(block).toContain('_CemManifestOrClass<_CemT_');
+    });
+
+    it('should hoist _Cem helpers to module level and keep non-identifier bindings off dot access', () => {
+      const index = new CustomElementsManifestIndex([
+        {
+          tagName: 'my-el',
+          properties: [
+            {name: 'data-val', checkType: 'import("@pkg/my-el.js").Val', checkTypeIsExternal: true},
+          ],
+          attributes: [],
+          events: [],
+          classImports: [{specifier: '@pkg/my-el.js', exportName: 'MyEl'}],
+          isPackageManifest: true,
+        },
+      ]);
+
+      const block = tcb('<my-el [a+b]="v" [data-val]="v" [normalProp]="v"></my-el>', [], {
+        customElementsManifestIndex: index,
+      });
+      // Helpers are hoisted before `function _tcb1`.
+      expect(block.indexOf('type _CemTag<')).toBeLessThan(block.indexOf('function _tcb1'));
+      expect(block).not.toContain('.a+b');
+      expect(block).toContain('["data-val"] = ');
+      expect(block).toContain('.normalProp = ');
+
+      // Non-strict mode emits existence check (`= (null! as any)`) for undeclared properties.
+      const nonStrictBlock = tcb('<my-el [extraProp]="v"></my-el>', [], {
+        customElementsManifestIndex: index,
+        checkTypeOfInputBindings: false,
+      });
+      expect(nonStrictBlock).toContain('.extraProp = (null! as any);');
+    });
+
+    it('should use _CemPropTarget under CUSTOM_ELEMENTS_SCHEMA and _CemDomPropTarget for base DOM props', () => {
+      const index = new CustomElementsManifestIndex([
+        {
+          tagName: 'my-el',
+          properties: [],
+          attributes: [],
+          events: [],
+          classImports: [{specifier: '@pkg/my-el.js', exportName: 'MyEl'}],
+          isPackageManifest: true,
+        },
+      ]);
+
+      const strictBlock = tcb('<my-el [title]="t" [unknownProp]="u"></my-el>', [], {
+        customElementsManifestIndex: index,
+      });
+      expect(strictBlock).toContain('type _CemDomPropTarget<');
+      expect(strictBlock).toContain('_CemDomPropTarget<_CemRaw_1, "title">');
+      expect(strictBlock).toContain('_CemEl<_CemRaw_1, "my-el", "unknownProp">');
+
+      const permissiveBlock = tcb(
+        '<my-el [unknownProp]="u"></my-el>',
+        [],
+        {customElementsManifestIndex: index},
+        {schemas: [CUSTOM_ELEMENTS_SCHEMA]},
+      );
+      expect(permissiveBlock).toContain('type _CemPropTarget<');
+      expect(permissiveBlock).toContain('_CemPropTarget<_CemRaw_1, "unknownProp">');
+      expect(permissiveBlock).not.toContain('type _CemEl<');
+    });
+
+    it('should gate unreachable CEM imports, emit _CemEvDetail for external CustomEvent details, and use _CemEvTarget on addEventListener fallbacks', () => {
+      const index = new CustomElementsManifestIndex([
+        {
+          tagName: 'gated-el',
+          properties: [
+            {
+              name: 'mode',
+              checkType: {
+                kind: 'import',
+                candidates: [
+                  {specifier: '@pkg/gated/missing.js', exportName: 'Mode'},
+                  {specifier: '@pkg/gated/dist/el.js', exportName: 'Mode'},
+                ],
+              },
+              checkTypeIsExternal: true,
+            },
+            {
+              name: 'selection',
+              checkType: 'globalThis.Selection',
+              checkTypeIsExternal: true,
+              checkTypeUsesUnreferencedGlobal: true,
+            },
+          ],
+          attributes: [],
+          events: [
+            {
+              name: 'gated-ev',
+              checkType: {
+                kind: 'concat',
+                parts: [
+                  'globalThis.CustomEvent<',
+                  {
+                    kind: 'customEventDetail',
+                    inner: {
+                      kind: 'import',
+                      candidates: [{specifier: '@pkg/gated/dist/el.js', exportName: 'Detail'}],
+                    },
+                  },
+                  '>',
+                ],
+              },
+              checkTypeIsExternal: true,
+              checkTypeUsesUnreferencedGlobal: true,
+            },
+            {
+              name: 'unreachable-ev',
+              checkType: {
+                kind: 'import',
+                candidates: [{specifier: '@pkg/gated/missing.js', exportName: 'MissingEvent'}],
+              },
+              checkTypeIsExternal: true,
+            },
+          ],
+          classImports: [
+            {specifier: '@pkg/gated/missing.js', exportName: 'GatedEl'},
+            {specifier: '@pkg/gated/dist/el.js', exportName: 'GatedEl'},
+          ],
+          isPackageManifest: true,
+        },
+      ]);
+
+      // When only `@pkg/gated/dist/el.js` is reachable, no `_CemFirst` or missing `import(...)`
+      // is emitted, `gated-ev` uses `_CemEvDetail`, and `unreachable-ev` + `click` fall back to
+      // `_CemEvTarget`.
+      const partialBlock = tcb(
+        '<gated-el [mode]="m" [selection]="s" [inherited]="true" (gated-ev)="onG($event)" (unreachable-ev)="onU($event)" (click)="onC($event)"></gated-el>',
+        [],
+        {customElementsManifestIndex: index},
+        {
+          getCemImportReachability: (spec) =>
+            spec === '@pkg/gated/dist/el.js' ? 'reachable' : 'unresolved',
+        },
+      );
+      expect(partialBlock).not.toContain('@pkg/gated/missing.js');
+      expect(partialBlock).not.toContain('type _CemFirst<');
+      expect(partialBlock).toContain('import("@pkg/gated/dist/el.js").GatedEl');
+      expect(partialBlock).toContain('import("@pkg/gated/dist/el.js").Mode');
+      expect(partialBlock).toContain('_CemClassOrManifest<_CemRaw_1, "selection"');
+      expect(partialBlock).toContain('_CemEl<_CemRaw_1, "gated-el", "inherited">');
+      expect(partialBlock).not.toContain('type _CemGatedEl<');
+      expect(partialBlock).toContain('type _CemEvDetail<');
+      expect(partialBlock).toContain(
+        'globalThis.CustomEvent<_CemEvDetail<import("@pkg/gated/dist/el.js").Detail>>',
+      );
+      expect(partialBlock).toContain('type _CemEvTarget<');
+      expect(partialBlock).toContain('_CemEvTarget<typeof _t1>).addEventListener("unreachable-ev"');
+      expect(partialBlock).toContain('_CemEvTarget<typeof _t1>).addEventListener("click"');
+
+      // When candidates are `'gated'` (typings exist on disk but aren't imported), zero
+      // `import(...)` nodes are emitted, the gated-out CustomEvent detail falls back to `any`,
+      // unreferenced globals like `Selection` use `_CemPropTarget` instead of DOM `Selection`,
+      // and undeclared properties use `_CemGatedEl`.
+      const gatedBlock = tcb(
+        '<gated-el [mode]="m" [selection]="s" [inherited]="true" (gated-ev)="onG($event)"></gated-el>',
+        [],
+        {customElementsManifestIndex: index},
+        {getCemImportReachability: () => 'gated'},
+      );
+      expect(gatedBlock).not.toContain('import(');
+      expect(gatedBlock).not.toContain('type _CemEvDetail<');
+      expect(gatedBlock).not.toContain('globalThis.Selection');
+      expect(gatedBlock).toContain('_CemTag<"gated-el", unknown>');
+      expect(gatedBlock).toContain('_CemPropTarget<_CemRaw_1, "selection">');
+      expect(gatedBlock).toContain('type _CemGatedEl<');
+      expect(gatedBlock).toContain('_CemGatedEl<_CemRaw_1, "gated-el", "inherited">');
+      expect(gatedBlock).toContain('globalThis.CustomEvent<any>');
+
+      // When all candidates are `'unresolved'` (e.g. a JS-only package with no `.d.ts` files),
+      // undeclared properties stay strict (`_CemEl`, not `_CemGatedEl`) because the manifest is
+      // the full contract.
+      const unresolvedBlock = tcb(
+        '<gated-el [mode]="m" [selection]="s" [inherited]="true" (gated-ev)="onG($event)"></gated-el>',
+        [],
+        {customElementsManifestIndex: index},
+        {getCemImportReachability: () => 'unresolved'},
+      );
+      expect(unresolvedBlock).not.toContain('import(');
+      expect(unresolvedBlock).not.toContain('type _CemGatedEl<');
+      expect(unresolvedBlock).toContain('_CemEl<_CemRaw_1, "gated-el", "inherited">');
+      expect(unresolvedBlock).toContain('_CemClassOrManifest<_CemRaw_1, "selection"');
+      expect(unresolvedBlock).toContain('globalThis.CustomEvent<any>');
     });
   });
 });

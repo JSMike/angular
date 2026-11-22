@@ -11,6 +11,7 @@ import {
   AST,
   BoundTarget,
   CssSelector,
+  CustomElementsManifestIndex,
   DomElementSchemaRegistry,
   ExternalExpr,
   ForeignComponentMeta,
@@ -67,6 +68,9 @@ import {
 } from '../../scope';
 import {isShim} from '../../shims';
 import {
+  CemImportReachability,
+  CemImportReachabilityHost,
+  getCemImportReachabilityInProgram,
   getSourceFileOrNull,
   getTokenAtPosition,
   isSymbolWithValueDeclaration,
@@ -285,6 +289,10 @@ export class TemplateTypeCheckerImpl implements TemplateTypeChecker {
 
   private isComplete = false;
   private priorResultsAdopted = false;
+  private domSchemaRegistry: DomElementSchemaRegistry;
+  private cemImportResolutionCache: ts.ModuleResolutionCache | null = null;
+  private cemImportReachabilityCache = new Map<string, CemImportReachability>();
+  private cemNonShimFileCache = new Map<ts.Path, boolean>();
 
   constructor(
     private originalProgram: ts.Program,
@@ -293,7 +301,7 @@ export class TemplateTypeCheckerImpl implements TemplateTypeChecker {
     private config: TypeCheckingConfig,
     private refEmitter: ReferenceEmitter,
     private reflector: ReflectionHost,
-    private compilerHost: Pick<ts.CompilerHost, 'getCanonicalFileName' | 'getSourceFile'>,
+    private compilerHost: Pick<ts.CompilerHost, 'getSourceFile'> & CemImportReachabilityHost,
     private priorBuild: IncrementalBuild<unknown, FileTypeCheckingData>,
     private readonly metaReader: MetadataReader,
     private readonly localMetaReader: MetadataReaderWithIndex,
@@ -301,7 +309,63 @@ export class TemplateTypeCheckerImpl implements TemplateTypeChecker {
     private readonly componentScopeReader: ComponentScopeReader,
     private readonly typeCheckScopeRegistry: TypeCheckScopeRegistry,
     private readonly perf: PerfRecorder,
-  ) {}
+  ) {
+    this.domSchemaRegistry =
+      this.config.customElementsManifestIndex != null
+        ? new DomElementSchemaRegistry(this.config.customElementsManifestIndex)
+        : REGISTRY;
+  }
+
+  private getCemImportReachability(emittingFile: string, specifier: string): CemImportReachability {
+    const cacheKey = `${emittingFile}\0${specifier}`;
+    const cached = this.cemImportReachabilityCache.get(cacheKey);
+    if (cached !== undefined) {
+      return cached;
+    }
+    const reachability = getCemImportReachabilityInProgram(
+      this.originalProgram,
+      this.compilerHost,
+      emittingFile,
+      specifier,
+      isShim,
+      () =>
+        (this.cemImportResolutionCache ??= ts.createModuleResolutionCache(
+          this.compilerHost.getCurrentDirectory?.() ?? '',
+          (fileName) => this.compilerHost.getCanonicalFileName(fileName),
+          this.originalProgram.getCompilerOptions(),
+        )),
+      this.cemNonShimFileCache,
+    );
+    this.cemImportReachabilityCache.set(cacheKey, reachability);
+    return reachability;
+  }
+
+  private areCemImportDecisionsValid(fileData: FileTypeCheckingData): boolean {
+    for (const shimData of fileData.shimData.values()) {
+      if (shimData.cemImportDecisions === undefined) {
+        continue;
+      }
+      for (const [containingFile, specifier, previous] of shimData.cemImportDecisions) {
+        if (this.getCemImportReachability(containingFile, specifier) !== previous) {
+          return false;
+        }
+      }
+    }
+    return true;
+  }
+
+  getCustomElementsManifestIndex(): CustomElementsManifestIndex | null {
+    return this.config.customElementsManifestIndex ?? null;
+  }
+
+  updateCustomElementsManifestIndex(index: CustomElementsManifestIndex | null): void {
+    this.config.customElementsManifestIndex = index;
+    this.domSchemaRegistry = index !== null ? new DomElementSchemaRegistry(index) : REGISTRY;
+    this.elementTagCache.clear();
+    this.cemImportReachabilityCache.clear();
+    this.cemNonShimFileCache.clear();
+    this.cemImportResolutionCache = null;
+  }
 
   getTypeOfSymbol(symbol: Symbol | BindingSymbol | ClassSymbol): ts.Type | null {
     const location =
@@ -964,7 +1028,11 @@ export class TemplateTypeCheckerImpl implements TemplateTypeChecker {
       }
 
       const previousResults = this.priorBuild.priorTypeCheckingResultsFor(sf);
-      if (previousResults === null || !previousResults.isComplete) {
+      if (
+        previousResults === null ||
+        !previousResults.isComplete ||
+        !this.areCemImportDecisionsValid(previousResults)
+      ) {
         continue;
       }
 
@@ -1058,6 +1126,8 @@ export class TemplateTypeCheckerImpl implements TemplateTypeChecker {
       host,
       this.programDriver.inliningMode,
       this.perf,
+      this.domSchemaRegistry,
+      (containingFile, specifier) => this.getCemImportReachability(containingFile, specifier),
     );
   }
 
@@ -1456,7 +1526,7 @@ export class TemplateTypeCheckerImpl implements TemplateTypeChecker {
 
     const tagMap = new Map<string, PotentialDirective | null>();
 
-    for (const tag of REGISTRY.allKnownElementNames()) {
+    for (const tag of this.domSchemaRegistry.allKnownElementNames()) {
       tagMap.set(tag, null);
     }
 
@@ -1483,15 +1553,15 @@ export class TemplateTypeCheckerImpl implements TemplateTypeChecker {
   }
 
   getPotentialDomBindings(tagName: string): {attribute: string; property: string}[] {
-    const attributes = REGISTRY.allKnownAttributesOfElement(tagName);
+    const attributes = this.domSchemaRegistry.allKnownAttributesOfElement(tagName);
     return attributes.map((attribute) => ({
       attribute,
-      property: REGISTRY.getMappedPropName(attribute),
+      property: this.domSchemaRegistry.getMappedPropName(attribute),
     }));
   }
 
   getPotentialDomEvents(tagName: string): string[] {
-    return REGISTRY.allKnownEventsOfElement(tagName);
+    return this.domSchemaRegistry.allKnownEventsOfElement(tagName);
   }
 
   getPrimaryAngularDecorator(target: ts.ClassDeclaration): ts.Decorator | null {

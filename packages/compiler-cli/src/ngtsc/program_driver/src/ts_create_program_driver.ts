@@ -9,7 +9,13 @@
 import ts from 'typescript';
 
 import {AbsoluteFsPath} from '../../file_system';
-import {copyFileShimData, retagAllTsFiles, ShimReferenceTagger, untagAllTsFiles} from '../../shims';
+import {
+  copyFileShimData,
+  retagAllTsFiles,
+  sfExtensionData,
+  ShimReferenceTagger,
+  untagAllTsFiles,
+} from '../../shims';
 import {RequiredDelegations, toUnredirectedSourceFile} from '../../util/src/typescript';
 
 import {
@@ -239,11 +245,14 @@ export class TsCreateProgramDriver implements ProgramDriver {
       this.sfMap.clear();
     }
 
-    for (const [filePath, {newText, originalFile}] of contents.entries()) {
+    for (const [filePath, {newText, originalFile, activeCemImports}] of contents.entries()) {
       const sf = ts.createSourceFile(filePath, newText, ts.ScriptTarget.Latest, true);
 
       if (originalFile !== null) {
         (sf as MaybeSourceFileWithOriginalFile)[NgOriginalFile] = originalFile;
+      }
+      if (activeCemImports !== undefined && activeCemImports.length > 0) {
+        sfExtensionData(sf).activeCemImports = activeCemImports;
       }
       this.sfMap.set(filePath, sf);
     }

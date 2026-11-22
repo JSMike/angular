@@ -68,6 +68,7 @@ export interface TargetOptions {
 
 // @public
 export interface TypeCheckingOptions {
+    customElementsManifests?: string[];
     strictAttributeTypes?: boolean;
     strictContextGenerics?: boolean;
     strictDomEventTypes?: boolean;

@@ -266,4 +266,23 @@ const NGP_KNOWN_NGTSC_FAILURES: ReadonlySet<string> = new Set([
   'ngtsc xi18n should extract xlf2',
   'ngtsc xi18n should extract xmb',
   'ngtsc xi18n should not emit js',
+
+  // Custom Elements Manifest type-checking is not implemented in NGP yet.
+  'ngtsc type checking custom elements manifests should type-check manifest properties, static attributes, events, and template references without CUSTOM_ELEMENTS_SCHEMA',
+  'ngtsc type checking custom elements manifests should resolve unimported package custom elements from manifest dist fallback and catch typos',
+  'ngtsc type checking custom elements manifests should use class setter types and catch narrowed DOM redeclarations while preserving SafeHtml',
+  'ngtsc type checking custom elements manifests should not collapse conflicting properties on element classes without HTMLElement heritage',
+  'ngtsc type checking custom elements manifests should degrade non-Event manifest event types to Event and accept manifest events under strictUnclaimedEventNames',
+  'ngtsc type checking custom elements manifests should survive local shadowing of HTMLElement and global types',
+  'ngtsc type checking custom elements manifests should re-type-check templates when a Custom Elements Manifest changes incrementally',
+  'ngtsc type checking custom elements manifests should accept class-only inherited properties in non-strict and basic modes without false NG8002',
+  'ngtsc type checking custom elements manifests should honor CUSTOM_ELEMENTS_SCHEMA and NO_ERRORS_SCHEMA while still checking declared manifest types',
+  'ngtsc type checking custom elements manifests should name _CemUnresolvedElement in diagnostics when a manifest class cannot be resolved',
+  'ngtsc type checking custom elements manifests should prefer the element class over unreferenced DOM global names like Selection',
+  'ngtsc type checking custom elements manifests should report a clean diagnostic for non-identifier property binding names like [a+b]',
+  'ngtsc type checking custom elements manifests should check inherited class properties for app-owned manifests whose tags are in HTMLElementTagNameMap',
+  'ngtsc type checking custom elements manifests should support inline type-check blocks, generic element classes, control flow, and two-way signal bindings',
+  'ngtsc type checking custom elements manifests should not re-emit unchanged files when only a Custom Elements Manifest changes incrementally',
+  'ngtsc type checking custom elements manifests should reload manifests when package.json exports redirect to a different manifest file',
+  'ngtsc type checking custom elements manifests should fall back to class types when manifest declares any, preserve MouseEvent for void click, and handle non-callable addEventListener and index signatures',
 ]);

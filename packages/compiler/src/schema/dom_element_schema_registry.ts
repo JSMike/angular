@@ -10,6 +10,7 @@ import {CUSTOM_ELEMENTS_SCHEMA, NO_ERRORS_SCHEMA, SchemaMetadata, SecurityContex
 import {isNgContainer, isNgContent, isNgTemplate, splitNsName} from '../ml_parser/tags';
 import {MATH_ML_NAMESPACE, SVG_NAMESPACE} from '../template/pipeline/src/namespaces';
 import {dashCaseToCamelCase} from '../util';
+import {CustomElementsManifestIndex} from './custom_elements_manifest_schema';
 import {checkSecurityContext} from './dom_security_schema';
 import {ElementSchemaRegistry} from './element_schema_registry';
 
@@ -341,57 +342,101 @@ const _PROP_TO_ATTR = Array.from(_ATTR_TO_PROP).reduce(
   new Map<string, string>(),
 );
 
-export class DomElementSchemaRegistry extends ElementSchemaRegistry {
-  private _schema = new Map<string, Map<string, string>>();
-  // We don't allow binding to events for security reasons. Allowing event bindings would almost
-  // certainly introduce bad XSS vulnerabilities. Instead, we store events in a separate schema.
-  private _eventSchema = new Map<string, Set<string>>();
-  // Union of all events in `_eventSchema`, built lazily by `isKnownEventOfAnyElement`. Since
-  // events bubble, any known event can be observed on any element, regardless of its tag.
-  private _allKnownEvents: Set<string> | null = null;
+interface BaseDomSchema {
+  readonly schema: ReadonlyMap<string, ReadonlyMap<string, string>>;
+  readonly eventSchema: ReadonlyMap<string, ReadonlySet<string>>;
+  readonly allKnownEvents: ReadonlySet<string>;
+}
 
-  constructor() {
-    super();
-    SCHEMA.forEach((encodedType) => {
-      const type = new Map<string, string>();
-      const events: Set<string> = new Set();
-      const [strType, strProperties] = encodedType.split('|');
-      const properties = strProperties.split(',');
-      const [typeNames, superName] = strType.split('^');
-      typeNames.split(',').forEach((tag) => {
-        this._schema.set(tag.toLowerCase(), type);
-        this._eventSchema.set(tag.toLowerCase(), events);
-      });
-      const superType = superName && this._schema.get(superName.toLowerCase());
-      if (superType) {
-        for (const [prop, value] of superType) {
-          type.set(prop, value);
-        }
-        for (const superEvent of this._eventSchema.get(superName.toLowerCase())!) {
-          events.add(superEvent);
+let _baseDomSchema: BaseDomSchema | null = null;
+
+function getBaseDomSchema(): BaseDomSchema {
+  if (_baseDomSchema !== null) {
+    return _baseDomSchema;
+  }
+  const schema = new Map<string, Map<string, string>>();
+  const eventSchema = new Map<string, Set<string>>();
+  SCHEMA.forEach((encodedType) => {
+    const type = new Map<string, string>();
+    const events: Set<string> = new Set();
+    const [strType, strProperties] = encodedType.split('|');
+    const properties = strProperties.split(',');
+    const [typeNames, superName] = strType.split('^');
+    typeNames.split(',').forEach((tag) => {
+      schema.set(tag.toLowerCase(), type);
+      eventSchema.set(tag.toLowerCase(), events);
+    });
+    const superType = superName && schema.get(superName.toLowerCase());
+    if (superType) {
+      for (const [prop, value] of superType) {
+        type.set(prop, value);
+      }
+      for (const superEvent of eventSchema.get(superName.toLowerCase())!) {
+        events.add(superEvent);
+      }
+    }
+    properties.forEach((property: string) => {
+      if (property.length > 0) {
+        switch (property[0]) {
+          case '*':
+            events.add(property.substring(1));
+            break;
+          case '!':
+            type.set(property.substring(1), BOOLEAN);
+            break;
+          case '#':
+            type.set(property.substring(1), NUMBER);
+            break;
+          case '%':
+            type.set(property.substring(1), OBJECT);
+            break;
+          default:
+            type.set(property, STRING);
         }
       }
-      properties.forEach((property: string) => {
-        if (property.length > 0) {
-          switch (property[0]) {
-            case '*':
-              events.add(property.substring(1));
-              break;
-            case '!':
-              type.set(property.substring(1), BOOLEAN);
-              break;
-            case '#':
-              type.set(property.substring(1), NUMBER);
-              break;
-            case '%':
-              type.set(property.substring(1), OBJECT);
-              break;
-            default:
-              type.set(property, STRING);
-          }
-        }
-      });
     });
+  });
+  const allKnownEvents = new Set<string>();
+  for (const events of eventSchema.values()) {
+    for (const event of events) {
+      allKnownEvents.add(event);
+    }
+  }
+  _baseDomSchema = {schema, eventSchema, allKnownEvents};
+  return _baseDomSchema;
+}
+
+export class DomElementSchemaRegistry extends ElementSchemaRegistry {
+  private readonly _schema: ReadonlyMap<string, ReadonlyMap<string, string>>;
+  // We don't allow binding to events for security reasons. Allowing event bindings would almost
+  // certainly introduce bad XSS vulnerabilities. Instead, we store events in a separate schema.
+  private readonly _eventSchema: ReadonlyMap<string, ReadonlySet<string>>;
+  // Union of all built-in events in `_eventSchema`. Since events bubble, any known event can be
+  // observed on any element, regardless of its tag.
+  private readonly _allKnownBaseEvents: ReadonlySet<string>;
+
+  /**
+   * @param customElementsManifestIndex custom elements from configured Custom Elements Manifests,
+   *     queried alongside the built-in DOM schema without cloning per-element maps.
+   */
+  constructor(
+    private readonly customElementsManifestIndex: CustomElementsManifestIndex | null = null,
+  ) {
+    super();
+    const base = getBaseDomSchema();
+    this._schema = base.schema;
+    this._eventSchema = base.eventSchema;
+    this._allKnownBaseEvents = base.allKnownEvents;
+  }
+
+  /** Whether any Custom Elements Manifest declares an element. */
+  hasCustomElementsManifestSchemas(): boolean {
+    return (this.customElementsManifestIndex?.tagNames.size ?? 0) > 0;
+  }
+
+  /** Whether a configured Custom Elements Manifest declares `tagName`. */
+  isCustomElementFromManifest(tagName: string): boolean {
+    return this.customElementsManifestIndex?.getSchema(tagName) != null;
   }
 
   override hasProperty(tagName: string, propName: string, schemaMetas: SchemaMetadata[]): boolean {
@@ -416,8 +461,20 @@ export class DomElementSchemaRegistry extends ElementSchemaRegistry {
       }
     }
 
-    const elementProperties = this._schema.get(normalizedTag) || this._schema.get('unknown')!;
-    return elementProperties.has(propName);
+    const elementProperties = this._schema.get(normalizedTag);
+    if (elementProperties !== undefined) {
+      return elementProperties.has(propName);
+    }
+    if (this.customElementsManifestIndex?.getSchema(normalizedTag) != null) {
+      if (this.customElementsManifestIndex.isUnbindableProperty(normalizedTag, propName)) {
+        return false;
+      }
+      return (
+        this._schema.get('[htmlelement]')!.has(propName) ||
+        this.customElementsManifestIndex.hasProperty(normalizedTag, propName)
+      );
+    }
+    return this._schema.get('unknown')!.has(propName);
   }
 
   override hasElement(tagName: string, schemaMetas: SchemaMetadata[]): boolean {
@@ -441,7 +498,10 @@ export class DomElementSchemaRegistry extends ElementSchemaRegistry {
       }
     }
 
-    return this._schema.has(normalizedTag);
+    return (
+      this._schema.has(normalizedTag) ||
+      this.customElementsManifestIndex?.getSchema(normalizedTag) != null
+    );
   }
 
   /**
@@ -517,30 +577,65 @@ export class DomElementSchemaRegistry extends ElementSchemaRegistry {
   }
 
   override allKnownElementNames(): string[] {
-    return Array.from(this._schema.keys());
+    if (
+      this.customElementsManifestIndex === null ||
+      this.customElementsManifestIndex.tagNames.size === 0
+    ) {
+      return Array.from(this._schema.keys());
+    }
+    const names = new Set<string>(this._schema.keys());
+    for (const tag of this.customElementsManifestIndex.tagNames) {
+      names.add(normalizeTagName(tag));
+    }
+    return Array.from(names);
   }
 
   allKnownAttributesOfElement(tagName: string): string[] {
     const normalizedTag = normalizeTagName(tagName);
-    const elementProperties = this._schema.get(normalizedTag) || this._schema.get('unknown')!;
-    // Convert properties to attributes.
-    return Array.from(elementProperties.keys()).map((prop) => _PROP_TO_ATTR.get(prop) ?? prop);
+    const elementProperties = this._schema.get(normalizedTag);
+    if (elementProperties !== undefined) {
+      // Convert properties to attributes.
+      return Array.from(elementProperties.keys()).map((prop) => _PROP_TO_ATTR.get(prop) ?? prop);
+    }
+    const customElement = this.customElementsManifestIndex?.getSchema(normalizedTag) ?? null;
+    if (customElement !== null) {
+      const props = new Set<string>(this._schema.get('[htmlelement]')!.keys());
+      for (const property of customElement.properties) {
+        props.add(property.name);
+      }
+      return Array.from(props).map((prop) => _PROP_TO_ATTR.get(prop) ?? prop);
+    }
+    return Array.from(this._schema.get('unknown')!.keys()).map(
+      (prop) => _PROP_TO_ATTR.get(prop) ?? prop,
+    );
   }
 
   allKnownEventsOfElement(tagName: string): string[] {
     const normalizedTag = normalizeTagName(tagName);
-    return Array.from(this._eventSchema.get(normalizedTag) ?? []);
+    const baseEvents = this._eventSchema.get(normalizedTag);
+    if (baseEvents !== undefined) {
+      return Array.from(baseEvents);
+    }
+    const customElement = this.customElementsManifestIndex?.getSchema(normalizedTag) ?? null;
+    if (customElement !== null) {
+      const events = new Set<string>(this._eventSchema.get('[htmlelement]')!);
+      for (const event of customElement.events) {
+        events.add(event.name);
+      }
+      return Array.from(events);
+    }
+    return [];
   }
 
   isKnownEventOfAnyElement(eventName: string): boolean {
-    // Note: `flat()` would not work here since it only flattens nested arrays,
-    // while `_eventSchema` contains `Set`s.
-    this._allKnownEvents ??= new Set(
-      Array.from(this._eventSchema.values()).flatMap((events) => Array.from(events)),
-    );
     // The schema stores event names in lowercase, but some events have camelCase names at
     // runtime (e.g. the vendor-prefixed `webkitAnimationEnd`), so compare ignoring case.
-    return this._allKnownEvents.has(eventName.toLowerCase());
+    return this._allKnownBaseEvents.has(eventName.toLowerCase());
+  }
+
+  /** Whether a configured Custom Elements Manifest declares an event with exactly this name. */
+  isEventFromManifest(eventName: string): boolean {
+    return this.customElementsManifestIndex?.hasEventOnAnyElement(eventName) ?? false;
   }
 
   override normalizeAnimationStyleProperty(propName: string): string {

@@ -7,6 +7,7 @@
  */
 
 import {CUSTOM_ELEMENTS_SCHEMA, NO_ERRORS_SCHEMA, SecurityContext} from '../../src/core';
+import {CustomElementsManifestIndex} from '../../src/schema/custom_elements_manifest_schema';
 import {
   _ATTR_TO_PROP,
   DomElementSchemaRegistry,
@@ -392,5 +393,46 @@ If 'svg:onclick' is a directive input, make sure the directive is imported by th
       .forEach((prop) => {
         expect(elementschema).toContain(prop);
       });
+  });
+
+  describe('custom elements manifest schemas', () => {
+    it('should recognize declared tags, properties, and events without CUSTOM_ELEMENTS_SCHEMA', () => {
+      const cemRegistry = new DomElementSchemaRegistry(
+        new CustomElementsManifestIndex([
+          {
+            tagName: 'my-button',
+            properties: [{name: 'variant', checkType: '"primary" | "danger"'}],
+            attributes: [
+              {name: 'variant', checkType: '"primary" | "danger"', checkTypeIsLiteralUnion: true},
+            ],
+            events: [{name: 'my-click', checkType: 'globalThis.CustomEvent<number>'}],
+            unbindableProperties: ['internalState', 'title'],
+          },
+        ]),
+      );
+
+      expect(cemRegistry.hasCustomElementsManifestSchemas()).toBeTrue();
+      expect(cemRegistry.hasElement('my-button', [])).toBeTrue();
+      expect(cemRegistry.hasElement('MY-BUTTON', [])).toBeTrue();
+      expect(cemRegistry.hasElement('other-button', [])).toBeFalse();
+
+      expect(cemRegistry.hasProperty('my-button', 'variant', [])).toBeTrue();
+      expect(cemRegistry.hasProperty('my-button', 'id', [])).toBeTrue();
+      expect(cemRegistry.hasProperty('my-button', 'unknownProp', [])).toBeFalse();
+      expect(
+        cemRegistry.hasProperty('my-button', 'unknownProp', [CUSTOM_ELEMENTS_SCHEMA]),
+      ).toBeTrue();
+      expect(cemRegistry.hasProperty('my-button', 'internalState', [])).toBeFalse();
+      // Manifest-declared readonly/private members override inherited HTMLElement properties.
+      expect(cemRegistry.hasProperty('my-button', 'title', [])).toBeFalse();
+
+      expect(cemRegistry.isEventFromManifest('my-click')).toBeTrue();
+      expect(cemRegistry.isEventFromManifest('other-event')).toBeFalse();
+    });
+
+    it('should report false for hasCustomElementsManifestSchemas when none are configured', () => {
+      expect(registry.hasCustomElementsManifestSchemas()).toBeFalse();
+      expect(registry.isEventFromManifest('my-click')).toBeFalse();
+    });
   });
 });

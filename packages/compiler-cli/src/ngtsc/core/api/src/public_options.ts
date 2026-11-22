@@ -238,6 +238,18 @@ export interface TypeCheckingOptions {
    * Defaults to `false`.
    */
   strictNgTemplateTypes?: boolean;
+
+  /**
+   * Custom Elements Manifest files that describe the custom elements used in templates. Angular
+   * uses them to check custom element tags, property bindings, static string-literal attributes,
+   * events, and local references without requiring `CUSTOM_ELEMENTS_SCHEMA`.
+   *
+   * Each entry is one of:
+   * - A file path relative to the project's tsconfig (`./...`, `../...`) or an absolute path.
+   * - A `.json` module specifier such as `@my/lib/custom-elements.json`.
+   * - A package name such as `@my/lib` whose `package.json` specifies a `customElements` field.
+   */
+  customElementsManifests?: string[];
 }
 
 /**

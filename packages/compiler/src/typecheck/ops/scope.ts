@@ -812,7 +812,15 @@ export class Scope {
         const isForeign = this.tcb.boundTarget.getForeignComponent(node) !== null;
         if (!isForeign) {
           const checkElement = this.requiresUnknownElementCheck(node, directives);
-          this.opQueue.push(new TcbDomSchemaCheckerOp(this.tcb, node, checkElement, claimedInputs));
+          this.opQueue.push(
+            new TcbDomSchemaCheckerOp(
+              this.tcb,
+              node,
+              checkElement,
+              claimedInputs,
+              /* deepSchemaOnly */ true,
+            ),
+          );
         }
       } else if (isExplicitNgTemplate(node) && this.tcb.env.config.checkTypeOfNgTemplateBindings) {
         const schemaClaimedInputs = new Set<string>();

@@ -11121,5 +11121,1628 @@ suppress
         "Type 'IncompatibleContext' is not assignable to type 'ExpectedContext'",
       );
     });
+
+    describe('custom elements manifests', () => {
+      it('should type-check manifest properties, static attributes, events, and template references without CUSTOM_ELEMENTS_SCHEMA', () => {
+        env.tsconfig({
+          strictTemplates: true,
+          customElementsManifests: ['./custom-elements.json'],
+        });
+        env.write(
+          'custom-elements.json',
+          JSON.stringify({
+            schemaVersion: '2.1.0',
+            modules: [
+              {
+                kind: 'javascript-module',
+                path: 'my-button.js',
+                declarations: [
+                  {
+                    kind: 'class',
+                    name: 'MyButton',
+                    customElement: true,
+                    tagName: 'my-button',
+                    members: [
+                      {
+                        kind: 'field',
+                        name: 'variant',
+                        attribute: 'variant',
+                        type: {text: "'primary' | 'danger'"},
+                      },
+                      {kind: 'field', name: 'count', type: {text: 'number'}},
+                    ],
+                    attributes: [
+                      {
+                        name: 'variant',
+                        fieldName: 'variant',
+                        type: {text: "'primary' | 'danger'"},
+                      },
+                    ],
+                    events: [{name: 'my-click', type: {text: 'CustomEvent<number>'}}],
+                  },
+                ],
+              },
+            ],
+          }),
+        );
+        env.write(
+          'test.ts',
+          `
+          import {Component} from '@angular/core';
+
+          @Component({
+            template: \`
+              <my-button variant="primary" [count]="1" (my-click)="onNum($event.detail)"></my-button>
+              <my-button variant="invalid" [count]="'bad'" [unknownProp]="1" (my-click)="onStr($event.detail)"></my-button>
+            \`,
+          })
+          export class AppCmp {
+            onNum(v: number) {}
+            onStr(v: string) {}
+          }
+        `,
+        );
+
+        const diags = env.driveDiagnostics();
+        const messages = diags.map((d) => ({
+          code: d.code,
+          text: ts.flattenDiagnosticMessageText(d.messageText, ' '),
+        }));
+        expect(
+          messages.some((m) => m.text.includes('Type \'"invalid"\' is not assignable')),
+        ).toBeTrue();
+        expect(
+          messages.some((m) => m.text.includes("Type 'string' is not assignable to type 'number'")),
+        ).toBeTrue();
+        expect(
+          messages.some((m) =>
+            m.text.includes(
+              `Property 'unknownProp' does not exist on type '_CemUnresolvedElement<"my-button">'`,
+            ),
+          ),
+        ).toBeTrue();
+        expect(
+          messages.some((m) =>
+            m.text.includes(
+              "Argument of type 'number' is not assignable to parameter of type 'string'",
+            ),
+          ),
+        ).toBeTrue();
+      });
+
+      it('should resolve imported package custom elements from manifest dist fallback and catch typos', () => {
+        env.tsconfig({
+          strictTemplates: true,
+          customElementsManifests: ['@pkg/ui'],
+        });
+        env.write(
+          'node_modules/@pkg/ui/package.json',
+          JSON.stringify({
+            name: '@pkg/ui',
+            customElements: 'dist/custom-elements.json',
+          }),
+        );
+        env.write(
+          'node_modules/@pkg/ui/dist/custom-elements.json',
+          JSON.stringify({
+            schemaVersion: '2.1.0',
+            modules: [
+              {
+                kind: 'javascript-module',
+                path: 'components/button.js',
+                declarations: [
+                  {
+                    kind: 'class',
+                    name: 'UiButton',
+                    customElement: true,
+                    tagName: 'ui-button',
+                    members: [{kind: 'field', name: 'disabled', type: {text: 'boolean'}}],
+                  },
+                ],
+                exports: [
+                  {
+                    kind: 'custom-element-definition',
+                    name: 'ui-button',
+                    declaration: {name: 'UiButton'},
+                  },
+                  {kind: 'js', name: 'default', declaration: {name: 'UiButton'}},
+                ],
+              },
+            ],
+          }),
+        );
+        env.write(
+          'node_modules/@pkg/ui/dist/components/button.d.ts',
+          `
+          export default class UiButton extends HTMLElement {
+            disabled: boolean;
+            size: 'sm' | 'lg';
+            readonly form: HTMLFormElement | null;
+          }
+        `,
+        );
+        env.write(
+          'test.ts',
+          `
+          import {Component} from '@angular/core';
+          import '@pkg/ui/dist/components/button.js';
+
+          @Component({
+            template: \`
+              <ui-button #btn [disabled]="true" [size]="'sm'"></ui-button>
+              {{ acceptBtn(btn.size) }}
+              <ui-button [size]="'xl'" [form]="null" [typoProp]="1"></ui-button>
+            \`,
+          })
+          export class AppCmp {
+            acceptBtn(size: 'sm' | 'lg') { return size; }
+          }
+        `,
+        );
+
+        const diags = env.driveDiagnostics();
+        const codes = diags.map((d) => d.code);
+        // TS2322 on size="'xl'", TS2540 on readonly form, TS2339 on typoProp
+        expect(codes).toContain(2322);
+        expect(codes).toContain(2540);
+        expect(codes).toContain(2339);
+        expect(diags.length).toBe(3);
+      });
+
+      it('should use class setter types and catch narrowed DOM redeclarations while preserving SafeHtml', () => {
+        env.tsconfig({
+          strictTemplates: true,
+          customElementsManifests: ['@pkg/review'],
+        });
+        env.write(
+          'node_modules/@pkg/review/package.json',
+          JSON.stringify({name: '@pkg/review', customElements: 'custom-elements.json'}),
+        );
+        env.write(
+          'node_modules/@pkg/review/custom-elements.json',
+          JSON.stringify({
+            schemaVersion: '2.1.0',
+            modules: [
+              {
+                kind: 'javascript-module',
+                path: 'review.js',
+                declarations: [
+                  {
+                    kind: 'class',
+                    name: 'ReviewEl',
+                    customElement: true,
+                    tagName: 'review-el',
+                    members: [{kind: 'field', name: 'value'}],
+                  },
+                ],
+                exports: [
+                  {
+                    kind: 'custom-element-definition',
+                    name: 'review-el',
+                    declaration: {name: 'ReviewEl'},
+                  },
+                  {kind: 'js', name: 'ReviewEl', declaration: {name: 'ReviewEl'}},
+                ],
+              },
+            ],
+          }),
+        );
+        env.write(
+          'node_modules/@pkg/review/review.d.ts',
+          `
+          export declare class ReviewEl extends HTMLElement {
+            get value(): string;
+            set value(v: string | number);
+            dir: 'ltr' | 'rtl';
+          }
+        `,
+        );
+        env.write(
+          'test.ts',
+          `
+          import {Component} from '@angular/core';
+          import '@pkg/review/review.js';
+
+          declare interface SafeHtml { readonly __safe: true; }
+
+          @Component({
+            template: \`
+              <review-el [value]="42" [innerHTML]="safeHtml" [dir]="'ltr'"></review-el>
+              <review-el [dir]="'auto'"></review-el>
+            \`,
+          })
+          export class AppCmp {
+            safeHtml!: SafeHtml;
+          }
+        `,
+        );
+
+        const diags = env.driveDiagnostics();
+        expect(diags.length).toBe(1);
+        expect(ts.flattenDiagnosticMessageText(diags[0].messageText, ' ')).toContain(
+          'Type \'"auto"\' is not assignable to type \'"ltr" | "rtl"\'',
+        );
+      });
+
+      it('should not collapse conflicting properties on element classes without HTMLElement heritage', () => {
+        env.tsconfig({
+          strictTemplates: true,
+          customElementsManifests: ['@pkg/plain'],
+        });
+        env.write(
+          'node_modules/@pkg/plain/package.json',
+          JSON.stringify({name: '@pkg/plain', customElements: 'custom-elements.json'}),
+        );
+        env.write(
+          'node_modules/@pkg/plain/custom-elements.json',
+          JSON.stringify({
+            schemaVersion: '2.1.0',
+            modules: [
+              {
+                kind: 'javascript-module',
+                path: 'plain.js',
+                declarations: [
+                  {
+                    kind: 'class',
+                    name: 'PlainEl',
+                    customElement: true,
+                    tagName: 'plain-el',
+                    members: [{kind: 'field', name: 'count', type: {text: 'number'}}],
+                  },
+                ],
+                exports: [
+                  {
+                    kind: 'custom-element-definition',
+                    name: 'plain-el',
+                    declaration: {name: 'PlainEl'},
+                  },
+                  {kind: 'js', name: 'PlainEl', declaration: {name: 'PlainEl'}},
+                ],
+              },
+            ],
+          }),
+        );
+        env.write(
+          'node_modules/@pkg/plain/plain.d.ts',
+          `
+          export declare class PlainEl {
+            count: number;
+            title: number;
+          }
+        `,
+        );
+        env.write(
+          'test.ts',
+          `
+          import {Component} from '@angular/core';
+          import '@pkg/plain/plain.js';
+
+          @Component({
+            template: \`
+              <plain-el #el [count]="1" [title]="42" (click)="onClick($event)"></plain-el>
+              {{ acceptNum(el.title) }}
+            \`,
+          })
+          export class AppCmp {
+            onClick(ev: MouseEvent) {}
+            acceptNum(n: number) { return n; }
+          }
+        `,
+        );
+
+        expect(env.driveDiagnostics()).toEqual([]);
+      });
+
+      it('should degrade non-Event manifest event types to Event and accept manifest events under strictUnclaimedEventNames', () => {
+        env.tsconfig({
+          strictTemplates: true,
+          strictUnclaimedEventNames: true,
+          customElementsManifests: ['./custom-elements.json'],
+        });
+        env.write(
+          'custom-elements.json',
+          JSON.stringify({
+            schemaVersion: '2.1.0',
+            modules: [
+              {
+                kind: 'javascript-module',
+                path: 'ev.js',
+                declarations: [
+                  {
+                    kind: 'class',
+                    name: 'EvEl',
+                    customElement: true,
+                    tagName: 'ev-el',
+                    events: [{name: 'ready', type: {text: 'void'}}],
+                  },
+                ],
+              },
+            ],
+          }),
+        );
+        env.write(
+          'test.ts',
+          `
+          import {Component, Directive} from '@angular/core';
+
+          @Directive({selector: '[marker]'})
+          export class MarkerDir {}
+
+          @Component({
+            imports: [MarkerDir],
+            template: \`<ev-el marker (ready)="onReady($event)"></ev-el>\`,
+          })
+          export class AppCmp {
+            onReady(ev: Event) {}
+          }
+        `,
+        );
+
+        expect(env.driveDiagnostics()).toEqual([]);
+      });
+
+      it('should survive local shadowing of HTMLElement and global types', () => {
+        env.tsconfig({
+          strictTemplates: true,
+          customElementsManifests: ['./custom-elements.json'],
+        });
+        env.write(
+          'custom-elements.json',
+          JSON.stringify({
+            schemaVersion: '2.1.0',
+            modules: [
+              {
+                kind: 'javascript-module',
+                path: 'date-el.js',
+                declarations: [
+                  {
+                    kind: 'class',
+                    name: 'DateEl',
+                    customElement: true,
+                    tagName: 'date-el',
+                    members: [{kind: 'field', name: 'when', type: {text: 'Date'}}],
+                  },
+                ],
+              },
+            ],
+          }),
+        );
+        env.write(
+          'test.ts',
+          `
+          import {Component} from '@angular/core';
+
+          type HTMLElement = never;
+          type Date = string;
+
+          @Component({
+            template: \`<date-el [when]="today"></date-el>\`,
+          })
+          export class AppCmp {
+            today = new globalThis.Date();
+          }
+        `,
+        );
+
+        expect(env.driveDiagnostics()).toEqual([]);
+      });
+
+      it('should re-type-check templates when a Custom Elements Manifest changes incrementally', () => {
+        env.enableMultipleCompilations();
+        env.tsconfig({
+          strictTemplates: true,
+          customElementsManifests: ['./custom-elements.json'],
+        });
+        const writeManifest = (propType: string) =>
+          env.write(
+            'custom-elements.json',
+            JSON.stringify({
+              schemaVersion: '2.1.0',
+              modules: [
+                {
+                  kind: 'javascript-module',
+                  path: 'inc-el.js',
+                  declarations: [
+                    {
+                      kind: 'class',
+                      name: 'IncEl',
+                      customElement: true,
+                      tagName: 'inc-el',
+                      members: [{kind: 'field', name: 'value', type: {text: propType}}],
+                    },
+                  ],
+                },
+              ],
+            }),
+          );
+        writeManifest('string');
+        env.write(
+          'test.ts',
+          `
+          import {Component} from '@angular/core';
+
+          @Component({
+            template: \`<inc-el [value]="val"></inc-el>\`,
+          })
+          export class AppCmp {
+            val = 'ok';
+          }
+        `,
+        );
+
+        expect(env.driveDiagnostics()).toEqual([]);
+
+        writeManifest('number');
+        const diags = env.driveDiagnostics();
+        expect(diags.length).toBe(1);
+        expect(ts.flattenDiagnosticMessageText(diags[0].messageText, ' ')).toContain(
+          "Type 'string' is not assignable to type 'number'",
+        );
+      });
+
+      it('should accept class-only inherited properties in non-strict and basic modes without false NG8002', () => {
+        const writeLib = (template: string) => {
+          env.write(
+            'node_modules/@pkg/inh/package.json',
+            JSON.stringify({name: '@pkg/inh', customElements: 'custom-elements.json'}),
+          );
+          env.write(
+            'node_modules/@pkg/inh/custom-elements.json',
+            JSON.stringify({
+              schemaVersion: '2.1.0',
+              modules: [
+                {
+                  kind: 'javascript-module',
+                  path: 'el.js',
+                  declarations: [
+                    {
+                      kind: 'class',
+                      name: 'InhEl',
+                      customElement: true,
+                      tagName: 'inh-el',
+                      members: [{kind: 'field', name: 'label', type: {text: 'string'}}],
+                    },
+                  ],
+                  exports: [
+                    {
+                      kind: 'custom-element-definition',
+                      name: 'inh-el',
+                      declaration: {name: 'InhEl'},
+                    },
+                    {kind: 'js', name: 'InhEl', declaration: {name: 'InhEl'}},
+                  ],
+                },
+              ],
+            }),
+          );
+          env.write(
+            'node_modules/@pkg/inh/el.d.ts',
+            `export declare class InhEl extends HTMLElement { label: string; inheritedProp: boolean; }`,
+          );
+          env.write(
+            'test.ts',
+            `
+            import {Component} from '@angular/core';
+            import '@pkg/inh/el.js';
+            @Component({template: \`${template}\`})
+            export class AppCmp { l = 123; }
+          `,
+          );
+        };
+
+        // Full non-strict mode: accepts inheritedProp (even with wrong value type) and catches typos.
+        env.tsconfig({
+          fullTemplateTypeCheck: true,
+          strictTemplates: false,
+          customElementsManifests: ['@pkg/inh'],
+        });
+        writeLib('<inh-el [label]="l" [inheritedProp]="l"></inh-el>');
+        expect(env.driveDiagnostics()).toEqual([]);
+
+        writeLib('<inh-el [typoProp]="1"></inh-el>');
+        const fullTypo = env.driveDiagnostics();
+        expect(fullTypo.length).toBe(1);
+        expect(fullTypo[0].code).toBe(2339);
+
+        // True basic mode (`fullTemplateTypeCheck: false, strictTemplates: false`):
+        env.tsconfig({
+          fullTemplateTypeCheck: false,
+          strictTemplates: false,
+          customElementsManifests: ['@pkg/inh'],
+        });
+        writeLib('<inh-el [label]="l" [inheritedProp]="l"></inh-el>');
+        expect(env.driveDiagnostics()).toEqual([]);
+
+        writeLib('<inh-el [typoProp]="1"></inh-el>');
+        const basicTypo = env.driveDiagnostics();
+        expect(basicTypo.length).toBe(1);
+        expect(basicTypo[0].code).toBe(2339);
+      });
+
+      it('should honor CUSTOM_ELEMENTS_SCHEMA and NO_ERRORS_SCHEMA while still checking declared manifest types', () => {
+        env.tsconfig({
+          strictTemplates: true,
+          customElementsManifests: ['./custom-elements.json'],
+        });
+        env.write(
+          'custom-elements.json',
+          JSON.stringify({
+            schemaVersion: '2.1.0',
+            modules: [
+              {
+                kind: 'javascript-module',
+                path: 'el.js',
+                declarations: [
+                  {
+                    kind: 'class',
+                    name: 'SchemaEl',
+                    customElement: true,
+                    tagName: 'schema-el',
+                    members: [{kind: 'field', name: 'count', type: {text: 'number'}}],
+                  },
+                ],
+              },
+            ],
+          }),
+        );
+        env.write(
+          'test.ts',
+          `
+          import {Component, CUSTOM_ELEMENTS_SCHEMA, NO_ERRORS_SCHEMA} from '@angular/core';
+
+          @Component({
+            schemas: [CUSTOM_ELEMENTS_SCHEMA],
+            template: '<schema-el [extra]="1" [count]="bad"></schema-el>',
+          })
+          export class CustomSchemaCmp { bad = 'nope'; }
+
+          @Component({
+            schemas: [NO_ERRORS_SCHEMA],
+            template: '<schema-el [extra]="1" [count]="1"></schema-el>',
+          })
+          export class NoErrorsSchemaCmp {}
+        `,
+        );
+
+        const diags = env.driveDiagnostics();
+        expect(diags.length).toBe(1);
+        expect(ts.flattenDiagnosticMessageText(diags[0].messageText, ' ')).toContain(
+          "Type 'string' is not assignable to type 'number'",
+        );
+      });
+
+      it('should name _CemUnresolvedElement in diagnostics when a manifest class cannot be resolved', () => {
+        env.tsconfig({
+          strictTemplates: true,
+          customElementsManifests: ['@pkg/untyped'],
+        });
+        env.write(
+          'node_modules/@pkg/untyped/package.json',
+          JSON.stringify({name: '@pkg/untyped', customElements: 'custom-elements.json'}),
+        );
+        env.write(
+          'node_modules/@pkg/untyped/custom-elements.json',
+          JSON.stringify({
+            schemaVersion: '2.1.0',
+            modules: [
+              {
+                kind: 'javascript-module',
+                path: 'missing/el.js',
+                declarations: [
+                  {
+                    kind: 'class',
+                    name: 'MissingEl',
+                    customElement: true,
+                    tagName: 'missing-el',
+                    members: [{kind: 'field', name: 'ok', type: {text: 'boolean'}}],
+                  },
+                ],
+                exports: [
+                  {
+                    kind: 'custom-element-definition',
+                    name: 'missing-el',
+                    declaration: {name: 'MissingEl'},
+                  },
+                  {kind: 'js', name: 'MissingEl', declaration: {name: 'MissingEl'}},
+                ],
+              },
+            ],
+          }),
+        );
+        env.write('node_modules/@pkg/untyped/missing/el.d.ts', `export {};`);
+        env.write(
+          'test.ts',
+          `
+          import {Component} from '@angular/core';
+          import '@pkg/untyped/missing/el.js';
+
+          @Component({
+            template: \`
+              <missing-el #ref [ok]="true" [missingProp]="1"></missing-el>
+              {{ acceptHtmlEl(ref) }}
+              {{ ref.notHere }}
+            \`,
+          })
+          export class AppCmp {
+            acceptHtmlEl(el: HTMLElement) { return el.tagName; }
+          }
+        `,
+        );
+
+        const diags = env.driveDiagnostics();
+        const texts = diags.map((d) => ts.flattenDiagnosticMessageText(d.messageText, ' '));
+        expect(diags.length).toBe(2);
+        expect(texts.every((t) => t.includes('_CemUnresolvedElement<"missing-el">'))).toBeTrue();
+      });
+
+      it('should prefer the element class over unreferenced DOM global names like Selection', () => {
+        env.tsconfig({
+          strictTemplates: true,
+          customElementsManifests: ['@pkg/grid'],
+        });
+        env.write(
+          'node_modules/@pkg/grid/package.json',
+          JSON.stringify({name: '@pkg/grid', customElements: 'custom-elements.json'}),
+        );
+        env.write(
+          'node_modules/@pkg/grid/custom-elements.json',
+          JSON.stringify({
+            schemaVersion: '2.1.0',
+            modules: [
+              {
+                kind: 'javascript-module',
+                path: 'grid.js',
+                declarations: [
+                  {
+                    kind: 'class',
+                    name: 'GridEl',
+                    customElement: true,
+                    tagName: 'grid-el',
+                    members: [
+                      // Unreferenced `Selection` matches DOM global `Selection`, but the class uses its own type.
+                      {kind: 'field', name: 'selection', type: {text: 'Selection'}},
+                    ],
+                  },
+                ],
+                exports: [
+                  {
+                    kind: 'custom-element-definition',
+                    name: 'grid-el',
+                    declaration: {name: 'GridEl'},
+                  },
+                  {kind: 'js', name: 'GridEl', declaration: {name: 'GridEl'}},
+                ],
+              },
+            ],
+          }),
+        );
+        env.write(
+          'node_modules/@pkg/grid/grid.d.ts',
+          `
+          export type Selection = 'single' | 'multiple';
+          export declare class GridEl extends HTMLElement {
+            selection: Selection;
+          }
+        `,
+        );
+        env.write(
+          'test.ts',
+          `
+          import {Component} from '@angular/core';
+          import '@pkg/grid/grid.js';
+
+          @Component({
+            template: \`
+              <grid-el [selection]="'single'"></grid-el>
+              <grid-el [selection]="'invalid'"></grid-el>
+            \`,
+          })
+          export class AppCmp {}
+        `,
+        );
+
+        const diags = env.driveDiagnostics();
+        expect(diags.length).toBe(1);
+        expect(ts.flattenDiagnosticMessageText(diags[0].messageText, ' ')).toContain(
+          "Type '\"invalid\"' is not assignable to type 'Selection'",
+        );
+      });
+
+      it('should report a clean diagnostic for non-identifier property binding names like [a+b]', () => {
+        env.write(
+          'node_modules/@pkg/odd/package.json',
+          JSON.stringify({name: '@pkg/odd', customElements: 'custom-elements.json'}),
+        );
+        env.write(
+          'node_modules/@pkg/odd/custom-elements.json',
+          JSON.stringify({
+            schemaVersion: '2.1.0',
+            modules: [
+              {
+                kind: 'javascript-module',
+                path: 'odd.js',
+                declarations: [
+                  {kind: 'class', name: 'OddEl', customElement: true, tagName: 'odd-el'},
+                ],
+                exports: [
+                  {kind: 'custom-element-definition', name: 'odd-el', declaration: {name: 'OddEl'}},
+                  {kind: 'js', name: 'OddEl', declaration: {name: 'OddEl'}},
+                ],
+              },
+            ],
+          }),
+        );
+        env.write(
+          'node_modules/@pkg/odd/odd.d.ts',
+          `export declare class OddEl extends HTMLElement { label: string; }`,
+        );
+        env.write(
+          'test.ts',
+          `
+          import {Component} from '@angular/core';
+          import '@pkg/odd/odd.js';
+
+          @Component({template: '<odd-el [a+b]="1"></odd-el>'})
+          export class AppCmp {}
+        `,
+        );
+
+        // Reports NG8002 under both `strict: true` and `noImplicitAny: false`.
+        for (const noImplicitAny of [true, false]) {
+          env.tsconfig(
+            {strictTemplates: true, customElementsManifests: ['@pkg/odd']},
+            {strict: noImplicitAny, noImplicitAny},
+          );
+          const diags = env.driveDiagnostics();
+          expect(diags.length).toBe(1);
+          expect(diags[0].code).toBe(ngErrorCode(ErrorCode.SCHEMA_INVALID_ATTRIBUTE));
+          expect(ts.flattenDiagnosticMessageText(diags[0].messageText, ' ')).toContain("'a+b'");
+        }
+      });
+
+      it('should check inherited class properties for app-owned manifests whose tags are in HTMLElementTagNameMap', () => {
+        env.tsconfig({
+          strictTemplates: true,
+          customElementsManifests: ['./custom-elements.json'],
+        });
+        env.write(
+          'custom-elements.json',
+          JSON.stringify({
+            schemaVersion: '2.1.0',
+            modules: [
+              {
+                kind: 'javascript-module',
+                path: 'z-el.js',
+                declarations: [
+                  {
+                    kind: 'class',
+                    name: 'ZEl',
+                    customElement: true,
+                    tagName: 'z-el',
+                    members: [{kind: 'field', name: 'label', type: {text: 'string'}}],
+                  },
+                ],
+              },
+            ],
+          }),
+        );
+        env.write(
+          'globals.d.ts',
+          `
+          declare class ZEl extends HTMLElement {
+            label: string;
+            inheritedProp: number;
+          }
+          interface HTMLElementTagNameMap {
+            'z-el': ZEl;
+          }
+        `,
+        );
+        env.write(
+          'test.ts',
+          `
+          import {Component} from '@angular/core';
+
+          @Component({
+            template: \`
+              <z-el [label]="'ok'" [inheritedProp]="42"></z-el>
+              <z-el [inheritedProp]="'bad'" [typoProp]="1"></z-el>
+            \`,
+          })
+          export class AppCmp {}
+        `,
+        );
+
+        const diags = env.driveDiagnostics();
+        expect(diags.length).toBe(2);
+        expect(diags.map((d) => d.code).sort()).toEqual([2322, 2339]);
+      });
+
+      it('should support inline type-check blocks, generic element classes, control flow, and two-way signal bindings', () => {
+        env.tsconfig({
+          strictTemplates: true,
+          customElementsManifests: ['@pkg/rich'],
+        });
+        env.write(
+          'node_modules/@pkg/rich/package.json',
+          JSON.stringify({name: '@pkg/rich', customElements: 'custom-elements.json'}),
+        );
+        env.write(
+          'node_modules/@pkg/rich/custom-elements.json',
+          JSON.stringify({
+            schemaVersion: '2.1.0',
+            modules: [
+              {
+                kind: 'javascript-module',
+                path: 'rich.js',
+                declarations: [
+                  {
+                    kind: 'class',
+                    name: 'RichEl',
+                    customElement: true,
+                    tagName: 'rich-el',
+                    members: [{kind: 'field', name: 'value', type: {text: 'string'}}],
+                  },
+                ],
+                exports: [
+                  {
+                    kind: 'custom-element-definition',
+                    name: 'rich-el',
+                    declaration: {name: 'RichEl'},
+                  },
+                  {kind: 'js', name: 'RichEl', declaration: {name: 'RichEl'}},
+                ],
+              },
+            ],
+          }),
+        );
+        env.write(
+          'node_modules/@pkg/rich/rich.d.ts',
+          `
+          export declare class RichEl<T = string> extends HTMLElement {
+            value: string;
+            item: T;
+          }
+        `,
+        );
+        // Unexported component forces inline TCB generation.
+        env.write(
+          'test.ts',
+          `
+          import {Component, signal} from '@angular/core';
+          import '@pkg/rich/rich.js';
+
+          @Component({
+            template: \`
+              @if (show) {
+                @for (entry of items; track entry) {
+                  <rich-el [(value)]="valSig" [item]="entry"></rich-el>
+                }
+              }
+              <rich-el [(value)]="numSig"></rich-el>
+            \`,
+          })
+          class PrivateAppCmp {
+            show = true;
+            items = ['a', 'b'];
+            valSig = signal('hello');
+            numSig = signal(42);
+          }
+        `,
+        );
+
+        const diags = env.driveDiagnostics();
+        expect(diags.length).toBe(1);
+        expect(ts.flattenDiagnosticMessageText(diags[0].messageText, ' ')).toContain(
+          "Type 'number' is not assignable to type 'string'",
+        );
+      });
+
+      it('should not re-emit unchanged files when only a Custom Elements Manifest changes incrementally', () => {
+        env.enableMultipleCompilations();
+        env.tsconfig({
+          strictTemplates: true,
+          customElementsManifests: ['./custom-elements.json'],
+        });
+        const writeManifest = (propType: string) =>
+          env.write(
+            'custom-elements.json',
+            JSON.stringify({
+              schemaVersion: '2.1.0',
+              modules: [
+                {
+                  kind: 'javascript-module',
+                  path: 'emit-el.js',
+                  declarations: [
+                    {
+                      kind: 'class',
+                      name: 'EmitEl',
+                      customElement: true,
+                      tagName: 'emit-el',
+                      members: [{kind: 'field', name: 'value', type: {text: propType}}],
+                    },
+                  ],
+                },
+              ],
+            }),
+          );
+        writeManifest('string');
+        env.write(
+          'test.ts',
+          `
+          import {Component} from '@angular/core';
+
+          @Component({template: '<emit-el [value]="val"></emit-el>'})
+          export class AppCmp { val = 'ok'; }
+        `,
+        );
+
+        env.driveMain();
+        expect(env.getFilesWrittenSinceLastFlush().has('/test.js')).toBeTrue();
+        env.flushWrittenFileTracking();
+
+        writeManifest('string | number');
+        env.driveMain();
+        // Manifest-only change must NOT force JS re-emit of unchanged components.
+        expect(env.getFilesWrittenSinceLastFlush().has('/test.js')).toBeFalse();
+      });
+
+      it('should reload manifests when package.json exports redirect to a different manifest file', () => {
+        env.enableMultipleCompilations();
+        env.tsconfig({
+          strictTemplates: true,
+          customElementsManifests: ['@pkg/redir/custom-elements.json'],
+        });
+        const writePkg = (target: string) =>
+          env.write(
+            'node_modules/@pkg/redir/package.json',
+            JSON.stringify({
+              name: '@pkg/redir',
+              exports: {'./custom-elements.json': target},
+            }),
+          );
+        env.write(
+          'node_modules/@pkg/redir/v1.json',
+          JSON.stringify({
+            schemaVersion: '2.1.0',
+            modules: [
+              {
+                kind: 'javascript-module',
+                path: 'el.js',
+                declarations: [
+                  {
+                    kind: 'class',
+                    name: 'RedirEl',
+                    customElement: true,
+                    tagName: 'redir-el',
+                    members: [{kind: 'field', name: 'mode', type: {text: 'number'}}],
+                  },
+                ],
+              },
+            ],
+          }),
+        );
+        env.write(
+          'node_modules/@pkg/redir/v2.json',
+          JSON.stringify({
+            schemaVersion: '2.1.0',
+            modules: [
+              {
+                kind: 'javascript-module',
+                path: 'el.js',
+                declarations: [
+                  {
+                    kind: 'class',
+                    name: 'RedirEl',
+                    customElement: true,
+                    tagName: 'redir-el',
+                    members: [{kind: 'field', name: 'mode', type: {text: 'boolean'}}],
+                  },
+                ],
+              },
+            ],
+          }),
+        );
+        writePkg('./v1.json');
+        env.write(
+          'test.ts',
+          `
+          import {Component} from '@angular/core';
+
+          @Component({template: '<redir-el [mode]="1"></redir-el>'})
+          export class AppCmp {}
+        `,
+        );
+
+        expect(env.driveDiagnostics()).toEqual([]);
+
+        writePkg('./v2.json');
+        const diags = env.driveDiagnostics();
+        expect(diags.length).toBe(1);
+        expect(ts.flattenDiagnosticMessageText(diags[0].messageText, ' ')).toContain(
+          "Type 'number' is not assignable to type 'boolean'",
+        );
+      });
+
+      it('should fall back to class types when manifest declares any, preserve MouseEvent for void click, and handle non-callable addEventListener and index signatures', () => {
+        env.tsconfig(
+          {strictTemplates: true, customElementsManifests: ['@pkg/edge']},
+          {noPropertyAccessFromIndexSignature: true},
+        );
+        env.write(
+          'node_modules/@pkg/edge/package.json',
+          JSON.stringify({name: '@pkg/edge', customElements: 'custom-elements.json'}),
+        );
+        env.write(
+          'node_modules/@pkg/edge/custom-elements.json',
+          JSON.stringify({
+            schemaVersion: '2.1.0',
+            modules: [
+              {
+                kind: 'javascript-module',
+                path: 'edge.js',
+                declarations: [
+                  {
+                    kind: 'class',
+                    name: 'EdgeEl',
+                    customElement: true,
+                    tagName: 'edge-el',
+                    members: [{kind: 'field', name: 'disabled', type: {text: 'any'}}],
+                    events: [{name: 'click', type: {text: 'void'}}],
+                  },
+                ],
+                exports: [
+                  {
+                    kind: 'custom-element-definition',
+                    name: 'edge-el',
+                    declaration: {name: 'EdgeEl'},
+                  },
+                  {kind: 'js', name: 'EdgeEl', declaration: {name: 'EdgeEl'}},
+                ],
+              },
+            ],
+          }),
+        );
+        env.write(
+          'node_modules/@pkg/edge/edge.d.ts',
+          `
+          export declare class EdgeEl {
+            disabled: boolean;
+            addEventListener: string;
+            [key: string]: number | boolean | string;
+          }
+        `,
+        );
+        env.write(
+          'test.ts',
+          `
+          import {Component} from '@angular/core';
+          import '@pkg/edge/edge.js';
+
+          @Component({
+            template: \`
+              <edge-el [disabled]="true" [dynNum]="42" (click)="onClick($event.clientX)"></edge-el>
+              <edge-el [disabled]="'bad'" [dynNum]="obj"></edge-el>
+            \`,
+          })
+          export class AppCmp {
+            obj = {};
+            onClick(x: number) {}
+          }
+        `,
+        );
+
+        const diags = env.driveDiagnostics();
+        expect(diags.length).toBe(2);
+        const texts = diags.map((d) => ts.flattenDiagnosticMessageText(d.messageText, ' '));
+        expect(
+          texts.some((t) => t.includes("Type 'string' is not assignable to type 'boolean'")),
+        ).toBeTrue();
+        expect(texts.some((t) => t.includes("Type '{}' is not assignable"))).toBeTrue();
+        expect(diags.some((d) => d.code === 4111 || d.code === 2349)).toBeFalse();
+      });
+
+      it('should gate CEM imports to the input program to prevent global augmentation leakage and upgrade incrementally on import', () => {
+        env.enableMultipleCompilations();
+        env.tsconfig({
+          strictTemplates: true,
+          customElementsManifests: ['@pkg/leak'],
+        });
+        env.write(
+          'node_modules/@pkg/leak/package.json',
+          JSON.stringify({name: '@pkg/leak', customElements: 'custom-elements.json'}),
+        );
+        env.write(
+          'node_modules/@pkg/leak/custom-elements.json',
+          JSON.stringify({
+            schemaVersion: '2.1.0',
+            modules: [
+              {
+                kind: 'javascript-module',
+                path: 'el.js',
+                declarations: [
+                  {
+                    kind: 'class',
+                    name: 'LeakEl',
+                    customElement: true,
+                    tagName: 'leak-el',
+                    members: [
+                      {kind: 'field', name: 'count', type: {text: 'number'}},
+                      {kind: 'field', name: 'selection', type: {text: 'Selection'}},
+                    ],
+                  },
+                ],
+                exports: [
+                  {
+                    kind: 'custom-element-definition',
+                    name: 'leak-el',
+                    declaration: {name: 'LeakEl'},
+                  },
+                  {kind: 'js', name: 'LeakEl', declaration: {name: 'LeakEl'}},
+                ],
+              },
+            ],
+          }),
+        );
+        env.write(
+          'node_modules/@pkg/leak/el.d.ts',
+          `
+          declare global {
+            interface Window {
+              __cemLeakGlobal: number;
+            }
+          }
+          export type Selection = 'single' | 'multiple';
+          export declare class LeakEl extends HTMLElement {
+            count: number;
+            selection: Selection;
+            extra: boolean;
+          }
+        `,
+        );
+        env.write('main.ts', `export const bootstrapped = true;`);
+        env.write(
+          'app.ts',
+          `
+          import {Component} from '@angular/core';
+
+          @Component({
+            template: \`
+              <leak-el [count]="'bad'" [extra]="true" [selection]="'single'"></leak-el>
+              <leak-el [extra]="'wrong'" [selection]="'invalid'"></leak-el>
+            \`,
+          })
+          export class AppCmp {}
+        `,
+        );
+        env.write(
+          'unrelated.ts',
+          `
+          import {Component} from '@angular/core';
+
+          @Component({
+            template: '{{ win.__cemLeakGlobal }}',
+          })
+          export class UnrelatedCmp {
+            win = window;
+          }
+        `,
+        );
+
+        // Step 1: Without any TS import of `@pkg/leak`, `el.d.ts` must NOT be loaded into the
+        // type-checking program. Unrelated templates still report TS2339 on `window.__cemLeakGlobal`,
+        // while `<leak-el>` still gets manifest-inline checking for `count` and avoids false errors
+        // on inherited `[extra]` and DOM-colliding `[selection]`.
+        const step1 = env.driveDiagnostics();
+        const step1ByFile = (fileSuffix: string) =>
+          step1.filter((d) => d.file?.fileName.endsWith(fileSuffix));
+        const unrelatedStep1 = step1ByFile('/unrelated.ts').map((d) => ({
+          code: d.code,
+          text: ts.flattenDiagnosticMessageText(d.messageText, ' '),
+        }));
+        expect(unrelatedStep1.length).toBe(1);
+        expect(unrelatedStep1[0].code).toBe(2339);
+        expect(unrelatedStep1[0].text).toContain('__cemLeakGlobal');
+        const appStep1 = step1ByFile('/app.ts').map((d) => ({
+          code: d.code,
+          text: ts.flattenDiagnosticMessageText(d.messageText, ' '),
+        }));
+        expect(appStep1.length).toBe(1);
+        expect(appStep1[0].code).toBe(2322);
+        expect(appStep1[0].text).toContain("'number'");
+
+        // Step 2: Import `@pkg/leak/el.js` in `main.ts` WITHOUT editing `app.ts`.
+        // Incremental rebuild must invalidate `app.ts`'s TCB so class-backed `[extra]` and
+        // `[selection]` upgrade to real type checking.
+        env.write('main.ts', `import '@pkg/leak/el.js';\nexport const bootstrapped = true;`);
+        const step2 = env.driveDiagnostics();
+        expect(step2.filter((d) => d.file?.fileName.endsWith('/unrelated.ts'))).toEqual([]);
+        const appStep2 = step2
+          .filter((d) => d.file?.fileName.endsWith('/app.ts'))
+          .map((d) => ({
+            code: d.code,
+            text: ts.flattenDiagnosticMessageText(d.messageText, ' '),
+          }));
+        expect(appStep2.length).toBe(3);
+        expect(appStep2.some((m) => m.code === 2322 && m.text.includes("'number'"))).toBeTrue();
+        expect(appStep2.some((m) => m.code === 2322 && m.text.includes("'boolean'"))).toBeTrue();
+        expect(appStep2.some((m) => m.code === 2322 && m.text.includes('Selection'))).toBeTrue();
+        expect(appStep2.some((m) => m.code === 2339)).toBeFalse();
+
+        // Step 3: Remove the import from `main.ts` WITHOUT editing `app.ts`.
+        // Incremental rebuild must invalidate `app.ts`'s TCB back to gated manifest-only and stop
+        // loading `el.d.ts`, restoring TS2339 on `unrelated.ts` without false errors on valid
+        // `[extra]="true"` or `[selection]="'single'"`.
+        env.write('main.ts', `export const bootstrapped = true;`);
+        const step3 = env.driveDiagnostics();
+        expect(
+          step3.filter((d) => d.file?.fileName.endsWith('/unrelated.ts')).map((d) => d.code),
+        ).toEqual([2339]);
+        const appStep3 = step3.filter((d) => d.file?.fileName.endsWith('/app.ts'));
+        expect(appStep3.length).toBe(1);
+        expect(appStep3[0].code).toBe(2322);
+      });
+
+      it('should immediately restore ordinary TS diagnostics after removing the last CEM package import on incremental rebuild', () => {
+        env.enableMultipleCompilations();
+        env.tsconfig({
+          strictTemplates: true,
+          customElementsManifests: ['@pkg/tsleak'],
+        });
+        env.write(
+          'node_modules/@pkg/tsleak/package.json',
+          JSON.stringify({name: '@pkg/tsleak', customElements: 'custom-elements.json'}),
+        );
+        env.write(
+          'node_modules/@pkg/tsleak/custom-elements.json',
+          JSON.stringify({
+            schemaVersion: '2.1.0',
+            modules: [
+              {
+                kind: 'javascript-module',
+                path: 'el.js',
+                declarations: [
+                  {
+                    kind: 'class',
+                    name: 'TsLeakEl',
+                    customElement: true,
+                    tagName: 'ts-leak-el',
+                    members: [{kind: 'field', name: 'count', type: {text: 'number'}}],
+                  },
+                ],
+                exports: [
+                  {
+                    kind: 'custom-element-definition',
+                    name: 'ts-leak-el',
+                    declaration: {name: 'TsLeakEl'},
+                  },
+                  {kind: 'js', name: 'TsLeakEl', declaration: {name: 'TsLeakEl'}},
+                ],
+              },
+            ],
+          }),
+        );
+        env.write(
+          'node_modules/@pkg/tsleak/el.d.ts',
+          `
+          declare global {
+            interface Window {
+              __tsCemLeak: number;
+            }
+          }
+          export declare class TsLeakEl extends HTMLElement {
+            count: number;
+            extra: boolean;
+          }
+        `,
+        );
+        env.write('main.ts', `import '@pkg/tsleak/el.js';\nexport const ok = true;`);
+        env.write('user.ts', `export const check: number = window.__tsCemLeak;`);
+        env.write(
+          'app.ts',
+          `
+          import {Component} from '@angular/core';
+          @Component({template: '<ts-leak-el [count]="1" [extra]="true"></ts-leak-el>'})
+          export class AppCmp {}
+        `,
+        );
+
+        // Build 1: package imported -> both ordinary TS (`user.ts`) and template (`app.ts`) pass,
+        // and `app.ngtypecheck.ts` records an active CEM import of `@pkg/tsleak/el.js`.
+        expect(env.driveDiagnostics()).toEqual([]);
+
+        // Build 2: remove the last user import from `main.ts` without editing `app.ts` or `user.ts`.
+        // Stale CEM shims must be pruned from the input `ts.Program` so ordinary TS diagnostics on
+        // `user.ts` immediately report TS2339 on the very first rebuild.
+        env.write('main.ts', `export const ok = true;`);
+        const afterRemove = env.driveDiagnostics();
+        const userDiags = afterRemove.filter((d) => d.file?.fileName.endsWith('/user.ts'));
+        expect(userDiags.length).toBe(1);
+        expect(userDiags[0].code).toBe(2339);
+        expect(ts.flattenDiagnosticMessageText(userDiags[0].messageText, ' ')).toContain(
+          '__tsCemLeak',
+        );
+      });
+
+      it('should degrade unresolved imported/global CustomEvent detail types to unknown while preserving any for gated-out, bare, and explicit-any CustomEvent', () => {
+        env.tsconfig({
+          strictTemplates: true,
+          customElementsManifests: ['@pkg/ev'],
+        });
+        env.write(
+          'node_modules/@pkg/ev/package.json',
+          JSON.stringify({name: '@pkg/ev', customElements: 'custom-elements.json'}),
+        );
+        env.write(
+          'node_modules/@pkg/ev/custom-elements.json',
+          JSON.stringify({
+            schemaVersion: '2.1.0',
+            modules: [
+              {
+                kind: 'javascript-module',
+                path: 'ev.js',
+                declarations: [
+                  {
+                    kind: 'class',
+                    name: 'EvEl',
+                    customElement: true,
+                    tagName: 'ev-el',
+                    events: [
+                      {
+                        name: 'unreachable-detail',
+                        type: {
+                          text: 'CustomEvent<UnreachableDetail>',
+                          references: [{name: 'UnreachableDetail', module: 'missing.js'}],
+                        },
+                      },
+                      {
+                        name: 'missing-export',
+                        type: {
+                          text: 'CustomEvent<MissingExport>',
+                          references: [{name: 'MissingExport', module: 'ev.js'}],
+                        },
+                      },
+                      {
+                        name: 'missing-global',
+                        type: {
+                          text: 'CustomEvent<MissingGlobalDetail>',
+                          references: [{name: 'MissingGlobalDetail', package: 'global:'}],
+                        },
+                      },
+                      {name: 'bare-custom', type: {text: 'CustomEvent'}},
+                      {name: 'explicit-any', type: {text: 'CustomEvent<any>'}},
+                      {
+                        name: 'unsupported-detail',
+                        type: {text: 'CustomEvent<(a: string) => void>'},
+                      },
+                    ],
+                  },
+                ],
+                exports: [
+                  {kind: 'custom-element-definition', name: 'ev-el', declaration: {name: 'EvEl'}},
+                  {kind: 'js', name: 'EvEl', declaration: {name: 'EvEl'}},
+                ],
+              },
+            ],
+          }),
+        );
+        env.write(
+          'node_modules/@pkg/ev/ev.d.ts',
+          `export declare class EvEl extends HTMLElement {}`,
+        );
+        env.write(
+          'test.ts',
+          `
+          import {Component} from '@angular/core';
+          import '@pkg/ev/ev.js';
+
+          @Component({
+            template: \`
+              <ev-el
+                (unreachable-detail)="onNum($event.detail.value)"
+                (missing-export)="onNum($event.detail)"
+                (missing-global)="onNum($event.detail)"
+                (bare-custom)="onNum($event.detail)"
+                (explicit-any)="onNum($event.detail)"
+                (unsupported-detail)="onNum($event.detail)"
+              ></ev-el>
+            \`,
+          })
+          export class AppCmp {
+            onNum(n: number) {}
+          }
+        `,
+        );
+
+        const diags = env.driveDiagnostics();
+        const texts = diags.map((d) => ts.flattenDiagnosticMessageText(d.messageText, ' '));
+        expect(diags.length).toBe(3);
+        // Imported-module missing export and missing global degrade to `unknown` (TS2345), while
+        // gated-out `unreachable-detail`, bare `CustomEvent`, and `CustomEvent<any>` stay `any`.
+        expect(
+          texts.filter((t) =>
+            t.includes(
+              "Argument of type 'unknown' is not assignable to parameter of type 'number'",
+            ),
+          ).length,
+        ).toBe(2);
+        // Syntactically unsupported CustomEvent<(...) => ...> degrades to `Event` (TS2339 on `.detail`).
+        expect(
+          texts.some((t) => t.includes("Property 'detail' does not exist on type 'Event'")),
+        ).toBeTrue();
+      });
+
+      it('should report TS2540 for readonly index signatures and TS2339 for unknown properties under noImplicitAny: false', () => {
+        env.write(
+          'node_modules/@pkg/ro/package.json',
+          JSON.stringify({name: '@pkg/ro', customElements: 'custom-elements.json'}),
+        );
+        env.write(
+          'node_modules/@pkg/ro/custom-elements.json',
+          JSON.stringify({
+            schemaVersion: '2.1.0',
+            modules: [
+              {
+                kind: 'javascript-module',
+                path: 'ro.js',
+                declarations: [
+                  {kind: 'class', name: 'RoIndexEl', customElement: true, tagName: 'ro-index-el'},
+                  {kind: 'class', name: 'NormalEl', customElement: true, tagName: 'normal-el'},
+                ],
+                exports: [
+                  {
+                    kind: 'custom-element-definition',
+                    name: 'ro-index-el',
+                    declaration: {name: 'RoIndexEl'},
+                  },
+                  {kind: 'js', name: 'RoIndexEl', declaration: {name: 'RoIndexEl'}},
+                  {
+                    kind: 'custom-element-definition',
+                    name: 'normal-el',
+                    declaration: {name: 'NormalEl'},
+                  },
+                  {kind: 'js', name: 'NormalEl', declaration: {name: 'NormalEl'}},
+                ],
+              },
+            ],
+          }),
+        );
+        env.write(
+          'node_modules/@pkg/ro/ro.d.ts',
+          `
+          export declare class RoIndexEl extends HTMLElement {
+            readonly [key: string]: unknown;
+          }
+          export declare class NormalEl extends HTMLElement {
+            label: string;
+          }
+        `,
+        );
+        env.write(
+          'test.ts',
+          `
+          import {Component} from '@angular/core';
+          import '@pkg/ro/ro.js';
+
+          @Component({
+            template: \`
+              <ro-index-el [dyn]="1"></ro-index-el>
+              <normal-el [typoProp]="1"></normal-el>
+            \`,
+          })
+          export class AppCmp {}
+        `,
+        );
+
+        env.tsconfig(
+          {strictTemplates: true, customElementsManifests: ['@pkg/ro']},
+          {noPropertyAccessFromIndexSignature: true, strict: false, noImplicitAny: false},
+        );
+        const diags = env.driveDiagnostics();
+        expect(diags.length).toBe(2);
+        expect(diags.map((d) => d.code).sort((a, b) => a - b)).toEqual([2339, 2540]);
+      });
+
+      it('should reject bindings to manifest-readonly properties that overlap HTMLElement', () => {
+        env.tsconfig({
+          strictTemplates: true,
+          customElementsManifests: ['./custom-elements.json'],
+        });
+        env.write(
+          'custom-elements.json',
+          JSON.stringify({
+            schemaVersion: '2.1.0',
+            modules: [
+              {
+                kind: 'javascript-module',
+                path: 'ro-title.js',
+                declarations: [
+                  {
+                    kind: 'class',
+                    name: 'RoTitleEl',
+                    customElement: true,
+                    tagName: 'ro-title-el',
+                    members: [
+                      {kind: 'field', name: 'title', readonly: true, type: {text: 'string'}},
+                    ],
+                  },
+                ],
+              },
+            ],
+          }),
+        );
+        env.write(
+          'test.ts',
+          `
+          import {Component} from '@angular/core';
+
+          @Component({template: '<ro-title-el [title]="t"></ro-title-el>'})
+          export class AppCmp { t = 'hello'; }
+        `,
+        );
+
+        const diags = env.driveDiagnostics();
+        expect(diags.length).toBe(1);
+        expect(diags[0].code).toBe(ngErrorCode(ErrorCode.SCHEMA_INVALID_ATTRIBUTE));
+      });
+
+      it('should stay strict on unknown properties for JS-only npm packages without .d.ts typings', () => {
+        env.tsconfig({
+          strictTemplates: true,
+          customElementsManifests: ['@pkg/jsonly'],
+        });
+        env.write(
+          'node_modules/@pkg/jsonly/package.json',
+          JSON.stringify({name: '@pkg/jsonly', customElements: 'custom-elements.json'}),
+        );
+        env.write(
+          'node_modules/@pkg/jsonly/custom-elements.json',
+          JSON.stringify({
+            schemaVersion: '2.1.0',
+            modules: [
+              {
+                kind: 'javascript-module',
+                path: 'el.js',
+                declarations: [
+                  {
+                    kind: 'class',
+                    name: 'JsOnlyEl',
+                    customElement: true,
+                    tagName: 'js-only-el',
+                    members: [{kind: 'field', name: 'label', type: {text: 'string'}}],
+                  },
+                ],
+                exports: [
+                  {
+                    kind: 'custom-element-definition',
+                    name: 'js-only-el',
+                    declaration: {name: 'JsOnlyEl'},
+                  },
+                  {kind: 'js', name: 'JsOnlyEl', declaration: {name: 'JsOnlyEl'}},
+                ],
+              },
+            ],
+          }),
+        );
+        env.write('node_modules/@pkg/jsonly/el.js', `export class JsOnlyEl extends HTMLElement {}`);
+        env.write(
+          'test.ts',
+          `
+          import {Component} from '@angular/core';
+
+          @Component({template: '<js-only-el [label]="\\'ok\\'" [typoProp]="1"></js-only-el>'})
+          export class AppCmp {}
+        `,
+        );
+
+        const diags = env.driveDiagnostics();
+        expect(diags.length).toBe(1);
+        expect(diags[0].code).toBe(2339);
+        expect(ts.flattenDiagnosticMessageText(diags[0].messageText, ' ')).toContain('typoProp');
+        expect(ts.flattenDiagnosticMessageText(diags[0].messageText, ' ')).toContain(
+          '_CemUnresolvedElement<"js-only-el">',
+        );
+      });
+    });
   });
 });

@@ -196,6 +196,26 @@ export class TcbUnclaimedOutputsOp extends TcbOp {
         const handler = tcbCreateEventHandler(output, this.tcb, this.scope, eventType.print());
         this.scope.addStatement(handler);
       } else if (this.tcb.env.config.checkTypeOfDomEvents) {
+        // Type `$event` from the manifest when declared. `_CemEv<...>` degrades unresolved
+        // references or non-Event types (e.g. `void`/`boolean` in some manifests) to `Event`.
+        const manifestIndex = this.tcb.env.config.customElementsManifestIndex ?? null;
+        const isManifestElement =
+          output.target === null &&
+          this.target instanceof Element &&
+          manifestIndex?.getSchema(this.target.name) != null;
+        const manifestEvent = isManifestElement
+          ? (manifestIndex!.getEvent((this.target as Element).name, output.name) ?? null)
+          : null;
+        if (manifestEvent?.checkType !== undefined) {
+          const alias = this.tcb.allocateCemTypeAlias(manifestEvent.checkType);
+          if (alias !== null) {
+            this.tcb.useCemHelper('_CemEv');
+            const handler = tcbCreateEventHandler(output, this.tcb, this.scope, `_CemEv<${alias}>`);
+            this.scope.addStatement(handler);
+            continue;
+          }
+        }
+
         // If strict checking of DOM events is enabled, generate a call to `addEventListener` on
         // the element instance so that TypeScript's type inference for
         // `HTMLElement.addEventListener` using `HTMLElementEventMap` to infer an accurate type for
@@ -240,7 +260,12 @@ export class TcbUnclaimedOutputsOp extends TcbOp {
           );
         }
 
-        const propertyAccess = new TcbExpr(`${target.print()}.addEventListener`).addParseSpanInfo(
+        let listenerReceiver = target.print();
+        if (isManifestElement) {
+          this.tcb.useCemHelper('_CemEvTarget');
+          listenerReceiver = `(${listenerReceiver} as unknown as _CemEvTarget<typeof ${listenerReceiver}>)`;
+        }
+        const propertyAccess = new TcbExpr(`${listenerReceiver}.addEventListener`).addParseSpanInfo(
           output.keySpan,
         );
         const handler = tcbCreateEventHandler(

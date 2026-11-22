@@ -8,7 +8,9 @@
 
 import {
   BoundTarget,
+  CemImportReachability,
   DirectiveMeta,
+  DomElementSchemaRegistry,
   DomSchemaChecker,
   generateTypeCheckBlock,
   OutOfBandDiagnosticRecorder,
@@ -44,7 +46,7 @@ import {
 } from '../api';
 import {makeTemplateDiagnostic} from '../diagnostics';
 
-import {RegistryDomSchemaChecker} from './dom';
+import {REGISTRY, RegistryDomSchemaChecker} from './dom';
 import {Environment} from './environment';
 import {OutOfBandDiagnosticRecorderImpl} from './oob';
 import {ReferenceEmitEnvironment} from './reference_emit_environment';
@@ -82,6 +84,13 @@ export interface ShimTypeCheckingData {
    * type-checking process.
    */
   data: Map<TypeCheckId, TypeCheckData>;
+
+  /**
+   * Recorded reachability decisions (`[containingFile, specifier, reachability]`) for Custom
+   * Elements Manifest `import(...)` candidates checked while emitting this shim. Revalidated
+   * before reusing this shim in an incremental compilation.
+   */
+  cemImportDecisions?: ReadonlyArray<readonly [string, string, CemImportReachability]>;
 }
 
 /**
@@ -161,6 +170,17 @@ export interface PendingShimData {
    * Diagnostics produced during shim creation.
    */
   shimDiagnostics: TemplateDiagnostic[] | null;
+
+  /**
+   * Recorded Custom Elements Manifest `import(...)` reachability decisions for this shim.
+   */
+  cemImportDecisions: Map<string, readonly [string, string, CemImportReachability]>;
+
+  /**
+   * Gate function that checks and records Custom Elements Manifest `import(...)` reachability
+   * for this shim.
+   */
+  cemImportGate?: (emittingFile: string, specifier: string) => CemImportReachability;
 }
 
 /**
@@ -213,6 +233,9 @@ export class TypeCheckContextImpl implements TypeCheckContext {
     private host: TypeCheckingHost,
     private inlining: InliningMode,
     private perf: PerfRecorder,
+    private domSchemaRegistry: DomElementSchemaRegistry = REGISTRY,
+    private cemImportChecker:
+      ((containingFile: string, specifier: string) => CemImportReachability) | null = null,
   ) {
     if (inlining === InliningMode.Error && config.useInlineTypeConstructors) {
       // We cannot use inlining for type checking since this environment does not support it.
@@ -593,14 +616,28 @@ export class TypeCheckContextImpl implements TypeCheckContext {
           hasInlines: pendingFileData.hasInlines,
           path: pendingShimData.file.fileName,
           data: pendingShimData.data,
+          ...(pendingShimData.cemImportDecisions.size > 0
+            ? {cemImportDecisions: Array.from(pendingShimData.cemImportDecisions.values())}
+            : {}),
         });
 
+        const activeCemImports: Array<readonly [string, string]> = [];
+        for (const [
+          emittingFile,
+          specifier,
+          reachability,
+        ] of pendingShimData.cemImportDecisions.values()) {
+          if (reachability === 'reachable') {
+            activeCemImports.push([emittingFile, specifier]);
+          }
+        }
         const sfText = pendingShimData.file.render();
         updates.set(pendingShimData.file.fileName, {
           newText: sfText,
 
           // Shim files do not have an associated original file.
           originalFile: null,
+          ...(activeCemImports.length > 0 ? {activeCemImports} : {}),
         });
       }
     }
@@ -627,6 +664,7 @@ export class TypeCheckContextImpl implements TypeCheckContext {
         this.reflector,
         shimData.domSchemaChecker,
         shimData.oobRecorder,
+        shimData.cemImportGate,
       ),
     );
 
@@ -634,17 +672,46 @@ export class TypeCheckContextImpl implements TypeCheckContext {
   }
 
   private pendingShimForClass(node: ts.ClassDeclaration): PendingShimData {
-    const fileData = this.dataForFile(node.getSourceFile());
-    const shimPath = TypeCheckShimGenerator.shimFor(absoluteFromSourceFile(node.getSourceFile()));
+    const sf = node.getSourceFile();
+    const sfPath = absoluteFromSourceFile(sf);
+    const fileData = this.dataForFile(sf);
+    const shimPath = TypeCheckShimGenerator.shimFor(sfPath);
     if (!fileData.shimData.has(shimPath)) {
+      const cemImportDecisions = new Map<
+        string,
+        readonly [string, string, CemImportReachability]
+      >();
+      const cemImportGate =
+        this.cemImportChecker !== null
+          ? (emittingFile: string, specifier: string): CemImportReachability => {
+              const reachability = this.cemImportChecker!(emittingFile, specifier);
+              cemImportDecisions.set(`${emittingFile}\0${specifier}`, [
+                emittingFile,
+                specifier,
+                reachability,
+              ]);
+              return reachability;
+            }
+          : undefined;
       fileData.shimData.set(shimPath, {
-        domSchemaChecker: new RegistryDomSchemaChecker(fileData.sourceManager),
+        domSchemaChecker: new RegistryDomSchemaChecker(
+          fileData.sourceManager,
+          this.domSchemaRegistry,
+        ),
         oobRecorder: new OutOfBandDiagnosticRecorderImpl(fileData.sourceManager, (name) =>
           this.compilerHost.getSourceFile(name, ts.ScriptTarget.Latest),
         ),
-        file: new TypeCheckFile(shimPath, this.config, this.refEmitter, this.compilerHost),
+        file: new TypeCheckFile(
+          shimPath,
+          this.config,
+          this.refEmitter,
+          this.compilerHost,
+          cemImportGate,
+        ),
         data: new Map<TypeCheckId, TypeCheckData>(),
         shimDiagnostics: null,
+        cemImportDecisions,
+        cemImportGate,
       });
     }
     return fileData.shimData.get(shimPath)!;
@@ -725,6 +792,7 @@ class InlineTcbOp implements Op {
     readonly reflector: ReflectionHost,
     readonly domSchemaChecker: DomSchemaChecker<unknown>,
     readonly oobRecorder: OutOfBandDiagnosticRecorder<unknown>,
+    readonly cemImportGate?: (emittingFile: string, specifier: string) => CemImportReachability,
   ) {}
 
   /**
@@ -735,11 +803,15 @@ class InlineTcbOp implements Op {
   }
 
   execute(im: ImportManager, tcbSf: ts.SourceFile, refEmitter: ReferenceEmitter): string {
-    const env = new Environment(this.config, im, refEmitter, tcbSf);
     const originalSf = this.ref.node.getSourceFile();
-    if (tcbSf !== originalSf) {
-      env.copiedSourceOriginPath = absoluteFromSourceFile(originalSf);
-    }
+    const env = new Environment(
+      this.config,
+      im,
+      refEmitter,
+      tcbSf,
+      tcbSf !== originalSf ? absoluteFromSourceFile(originalSf) : undefined,
+      this.cemImportGate,
+    );
     const fnName = `${TCB_FUNCTION_PREFIX}_${this.ref.node.pos}`;
 
     const {tcbMeta, component} = adaptTypeCheckBlockMetadata(

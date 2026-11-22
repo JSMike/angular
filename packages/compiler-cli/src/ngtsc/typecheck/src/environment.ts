@@ -7,6 +7,7 @@
  */
 
 import {
+  CemImportReachability,
   TcbDirectiveMetadata,
   TcbExpr,
   TcbPipeMetadata,
@@ -55,9 +56,20 @@ export class Environment extends ReferenceEmitEnvironment {
     refEmitter: ReferenceEmitter,
     contextFile: ts.SourceFile,
     copiedSourceOriginPath?: AbsoluteFsPath,
+    private readonly cemImportGate?: (
+      emittingFile: string,
+      specifier: string,
+    ) => CemImportReachability,
   ) {
     super(importManager, refEmitter, contextFile);
     this.copiedSourceOriginPath = copiedSourceOriginPath;
+  }
+
+  getCemImportReachability(specifier: string): CemImportReachability {
+    if (this.cemImportGate === undefined) {
+      return 'reachable';
+    }
+    return this.cemImportGate(this.contextFile.fileName, specifier);
   }
 
   /**

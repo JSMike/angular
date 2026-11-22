@@ -208,6 +208,23 @@ export enum ErrorCode {
   CONFIG_EMIT_DECLARATION_ONLY_UNSUPPORTED = 4006,
 
   /**
+   * Raised when a `customElementsManifests` entry does not resolve to a file or cannot be read.
+   */
+  CONFIG_CUSTOM_ELEMENTS_MANIFEST_NOT_FOUND = 4007,
+
+  /**
+   * Raised when `customElementsManifests` is misconfigured, or a manifest file is not valid JSON
+   * or does not match the Custom Elements Manifest root shape.
+   */
+  CONFIG_CUSTOM_ELEMENTS_MANIFEST_INVALID = 4008,
+
+  /**
+   * Raised as a warning for an app-owned Custom Elements Manifest that contains unsupported types,
+   * invalid tag names, duplicate tags, or structural inconsistencies.
+   */
+  CONFIG_CUSTOM_ELEMENTS_MANIFEST_WARNING = 4009,
+
+  /**
    * Raised when a host expression has a parse error, such as a host listener or host binding
    * expression containing a pipe.
    */

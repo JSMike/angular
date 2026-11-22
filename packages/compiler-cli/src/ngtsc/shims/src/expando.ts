@@ -31,6 +31,13 @@ export interface NgExtensionData {
    * The contents of the `referencedFiles` array, after modification by a `ShimReferenceTagger`.
    */
   taggedReferenceFiles: ReadonlyArray<ts.FileReference> | null;
+
+  /**
+   * Active (`reachable === true`) Custom Elements Manifest `[emittingFile, specifier]` decisions
+   * emitted into this type-check shim. Carried directly on the shim `ts.SourceFile` so stale shims
+   * can still be pruned even after multiple consecutive builds that skip template type-checking.
+   */
+  activeCemImports: ReadonlyArray<readonly [string, string]> | null;
 }
 
 /**
@@ -75,6 +82,7 @@ export function sfExtensionData(sf: ts.SourceFile): NgExtensionData {
     fileShim: null,
     originalReferencedFiles: null,
     taggedReferenceFiles: null,
+    activeCemImports: null,
   };
   extSf[NgExtension] = extension;
   return extension;
@@ -109,6 +117,16 @@ export function isFileShimSourceFile(sf: ts.SourceFile): sf is NgFileShimSourceF
  */
 export function isShim(sf: ts.SourceFile): boolean {
   return isExtended(sf) && (sf[NgExtension].fileShim !== null || sf[NgExtension].isTopLevelShim);
+}
+
+/**
+ * Returns active Custom Elements Manifest `[emittingFile, specifier]` imports recorded on a
+ * type-check shim `ts.SourceFile`, or `null` if none were recorded.
+ */
+export function getShimActiveCemImports(
+  sf: ts.SourceFile,
+): ReadonlyArray<readonly [string, string]> | null {
+  return isExtended(sf) ? sf[NgExtension].activeCemImports : null;
 }
 
 /**

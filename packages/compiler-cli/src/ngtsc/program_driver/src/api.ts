@@ -20,6 +20,12 @@ export interface FileUpdate {
    * targets a shim file then this is null, as shim files do not have an associated original file.
    */
   originalFile: ts.SourceFile | null;
+
+  /**
+   * Active (`reachable === true`) Custom Elements Manifest `[emittingFile, specifier]` imports
+   * emitted into this updated shim, if any.
+   */
+  activeCemImports?: ReadonlyArray<readonly [string, string]>;
 }
 
 export const NgOriginalFile: unique symbol = Symbol('NgOriginalFile');
