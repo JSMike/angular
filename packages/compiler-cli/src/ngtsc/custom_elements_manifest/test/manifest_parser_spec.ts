@@ -84,13 +84,26 @@ describe('custom elements manifest parser', () => {
     ]);
     expect(schema.unbindableProperties).toEqual(['internal', 'readOnlyProp', 'staticProp']);
     expect(schema.attributes).toEqual([
-      {name: 'variant', checkType: '"primary" | "danger"', checkTypeIsLiteralUnion: true},
-      {name: 'disabled'},
-      {name: 'size', checkType: '"sm" | "lg"', checkTypeIsLiteralUnion: true},
+      {
+        name: 'variant',
+        typeText: "'primary' | 'danger'",
+        checkType: '"primary" | "danger"',
+        checkTypeIsLiteralUnion: true,
+        stringLiteralValues: ['primary', 'danger'],
+      },
+      {name: 'disabled', typeText: 'boolean'},
+      {
+        name: 'size',
+        typeText: "'sm' | 'lg'",
+        checkType: '"sm" | "lg"',
+        checkTypeIsLiteralUnion: true,
+        stringLiteralValues: ['sm', 'lg'],
+      },
     ]);
     expect(schema.events).toEqual([
       {
         name: 'my-change',
+        typeText: 'CustomEvent<boolean>',
         checkType: 'globalThis.CustomEvent<boolean>',
         checkTypeIsExternal: true,
         checkTypeUsesUnreferencedGlobal: true,
@@ -226,7 +239,13 @@ describe('custom elements manifest parser', () => {
     const result = parseCustomElementsManifest(JSON.stringify(manifest), "'./el.json'");
     expect(result.errors).toEqual([]);
     expect(result.warnings).toEqual([]);
-    expect(result.schemas[0].properties).toEqual([{name: 'looseAny'}, {name: 'looseUnknown'}]);
-    expect(result.schemas[0].events).toEqual([{name: 'click'}, {name: 'change'}]);
+    expect(result.schemas[0].properties).toEqual([
+      {name: 'looseAny', typeText: 'any'},
+      {name: 'looseUnknown', typeText: 'unknown'},
+    ]);
+    expect(result.schemas[0].events).toEqual([
+      {name: 'click', typeText: 'void'},
+      {name: 'change', typeText: 'boolean'},
+    ]);
   });
 });

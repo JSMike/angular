@@ -26,6 +26,43 @@ import {isTypeScriptFile} from './utils';
 
 const PRE_COMPILED_STYLE_EXTENSIONS = ['.scss', '.sass', '.less', '.styl'];
 
+enum ResourceVersionKind {
+  Read,
+  Missing,
+  Dependency,
+}
+
+interface ReadResourceVersion {
+  kind: ResourceVersionKind.Read;
+  scriptVersion: string;
+  projectVersion: string;
+  modifiedTime: number | undefined;
+  fileSize: number | undefined;
+  /**
+   * Hash used for closed manifest dependencies and when TypeScript omits resource contents from
+   * its snapshot, such as oversized files (>4 MB).
+   */
+  contentHash: string | undefined;
+}
+
+interface MissingResourceVersion {
+  kind: ResourceVersionKind.Missing;
+}
+
+interface ResourceDependencyVersion {
+  kind: ResourceVersionKind.Dependency;
+  projectVersion: string;
+  modifiedTime: number | undefined;
+  fileSize: number | undefined;
+  /**
+   * Lazily populated in `syncResourceDependencies` for non-`Read` dependencies (e.g.
+   * `package.json`) so manifests immediately upgraded by `readResource` are not read twice.
+   */
+  contentHash: string | undefined;
+}
+
+type ResourceVersion = ReadResourceVersion | MissingResourceVersion | ResourceDependencyVersion;
+
 export class LanguageServiceAdapter implements NgCompilerAdapter {
   readonly entryPoint = null;
   readonly constructionDiagnostics: ts.Diagnostic[] = [];
@@ -34,17 +71,15 @@ export class LanguageServiceAdapter implements NgCompilerAdapter {
   readonly rootDirs: AbsoluteFsPath[];
 
   /**
-   * Map of resource filenames to the version of the file last read via `readResource`.
+   * Map of resource filenames to the version of the file last read via `readResource`, or recorded
+   * via `recordResourceDependency` for package metadata and missing files.
    *
    * Used to implement `getModifiedResourceFiles`.
    */
-  private readonly lastReadResourceVersion = new Map<string, string>();
+  private readonly lastReadResourceVersion = new Map<string, ResourceVersion>();
 
-  /**
-   * Map of Custom Elements Manifest resolution dependency paths (resolved manifests, `package.json`
-   * files, and candidate paths that may not exist yet) to their last observed snapshot token.
-   */
-  private readonly lastManifestSnapshot = new Map<AbsoluteFsPath, string | null>();
+  /** CEM resolution inputs must exist on disk even when TypeScript retains an editor buffer. */
+  private readonly resourceDependencies = new Set<string>();
 
   constructor(private readonly project: ts.server.Project) {
     this.rootDirs = getRootDirs(this, project.getCompilationSettings());
@@ -79,6 +114,47 @@ export class LanguageServiceAdapter implements NgCompilerAdapter {
     return fallbackResolve?.(url, fromFile) ?? null;
   }
 
+  recordResourceDependency(fileName: AbsoluteFsPath): void {
+    this.resourceDependencies.add(fileName);
+    const host = this.project.projectService.host;
+    if (!host.fileExists(fileName)) {
+      // Record missing files so creation triggers an update. Reading them as empty resources
+      // would replace the missing-file diagnostic with a parse error.
+      this.lastReadResourceVersion.set(fileName, {kind: ResourceVersionKind.Missing});
+    } else if (this.lastReadResourceVersion.get(fileName)?.kind !== ResourceVersionKind.Read) {
+      // Track resolution metadata, such as package.json, without adding it to the project's roots.
+      // Defer hashing until `syncResourceDependencies` so manifest files that are immediately
+      // upgraded to `Read` by `readResource` are not read and hashed twice.
+      this.lastReadResourceVersion.set(fileName, {
+        kind: ResourceVersionKind.Dependency,
+        projectVersion: this.project.getProjectVersion(),
+        modifiedTime: host.getModifiedTime?.(fileName)?.getTime(),
+        fileSize: host.getFileSize?.(fileName),
+        contentHash: undefined,
+      });
+    }
+  }
+
+  /**
+   * Drops Custom Elements Manifest resolution paths that are no longer active (for example after
+   * `package.json` redirects a manifest from `a.json` to `b.json`) so edits to abandoned files
+   * cannot repeatedly invalidate the compiler. Preserves ordinary template and stylesheet entries,
+   * and populates hashes for active non-`Read` dependencies (such as `package.json`).
+   */
+  syncResourceDependencies(activePaths: ReadonlySet<AbsoluteFsPath>): void {
+    for (const depPath of Array.from(this.resourceDependencies)) {
+      if (!activePaths.has(depPath as AbsoluteFsPath)) {
+        this.resourceDependencies.delete(depPath);
+        this.lastReadResourceVersion.delete(depPath);
+        continue;
+      }
+      const version = this.lastReadResourceVersion.get(depPath);
+      if (version?.kind === ResourceVersionKind.Dependency && version.contentHash === undefined) {
+        version.contentHash = this.hashResourceContent(this.readResourceFromDisk(depPath));
+      }
+    }
+  }
+
   isShim(sf: ts.SourceFile): boolean {
     return isShim(sf);
   }
@@ -89,7 +165,13 @@ export class LanguageServiceAdapter implements NgCompilerAdapter {
   }
 
   fileExists(fileName: string): boolean {
-    return this.project.fileExists(fileName);
+    return this.resourceDependencies.has(fileName)
+      ? this.project.projectService.host.fileExists(fileName)
+      : this.project.fileExists(fileName);
+  }
+
+  directoryExists(directoryName: string): boolean {
+    return this.project.directoryExists(directoryName);
   }
 
   readFile(fileName: string): string | undefined {
@@ -119,20 +201,30 @@ export class LanguageServiceAdapter implements NgCompilerAdapter {
    * packages/compiler-cli/src/ngtsc/core/api/src/interfaces.ts
    */
   readResource(fileName: string): string {
+    if (this.resourceDependencies.has(fileName) && !this.fileExists(fileName)) {
+      // Keep the editor buffer intact, but do not let a deleted manifest remain in the cache.
+      this.lastReadResourceVersion.set(fileName, {kind: ResourceVersionKind.Missing});
+      return '';
+    }
     if (isTypeScriptFile(fileName)) {
       console.error(`readResource() should not be called on TS file: ${fileName}`);
       return '';
     }
-    // Calling getScriptSnapshot() will actually create a ScriptInfo if it does
-    // not exist! The same applies for getScriptVersion().
-    // getScriptInfo() will not create one if it does not exist.
-    // In this case, we *want* a script info to be created so that we could
-    // keep track of its version.
-    const version = this.project.getScriptVersion(fileName);
-    this.lastReadResourceVersion.set(fileName, version);
-    const scriptInfo = this.project.getScriptInfo(fileName);
+    // getScriptInfo() will not create a ScriptInfo if it does not exist. In this case, we *want*
+    // a script info to be created so that we could keep track of its version. It is created with
+    // the project's host because TypeScript needs it to check the size of large resource files.
+    let scriptInfo = this.project.getScriptInfo(fileName);
+    if (scriptInfo === undefined) {
+      scriptInfo = this.project.projectService.getOrCreateScriptInfoForNormalizedPath(
+        ts.server.toNormalizedPath(fileName),
+        false,
+        undefined,
+        ts.ScriptKind.Unknown,
+        false,
+        this.project.projectService.host,
+      );
+    }
     if (!scriptInfo) {
-      // This should not happen because it would have failed already at `getScriptVersion`.
       console.error(`Failed to get script info when trying to read ${fileName}`);
       return '';
     }
@@ -143,62 +235,131 @@ export class LanguageServiceAdapter implements NgCompilerAdapter {
     if (!this.project.isRoot(scriptInfo)) {
       this.project.addRoot(scriptInfo);
     }
+
+    const host = this.project.projectService.host;
+    const modifiedTime = host.getModifiedTime?.(fileName)?.getTime();
+    const fileSize = host.getFileSize?.(fileName);
     const snapshot = scriptInfo.getSnapshot();
-    return snapshot.getText(0, snapshot.getLength());
+    const snapshotLength = snapshot.getLength();
+    let content = snapshot.getText(0, snapshotLength);
+    let contentHash: string | undefined;
+    if (
+      !scriptInfo.isScriptOpen() &&
+      (snapshotLength === 0 || this.resourceDependencies.has(fileName))
+    ) {
+      // TypeScript leaves the snapshot of an oversized closed file empty, and closed manifest
+      // dependencies may change on disk without a TypeScript watcher event. Read from disk while
+      // closed, and use the snapshot when open to include unsaved edits.
+      content = this.readResourceFromDisk(fileName);
+      if (content.length !== 0 || this.resourceDependencies.has(fileName)) {
+        contentHash = this.hashResourceContent(content);
+      }
+    }
+
+    this.lastReadResourceVersion.set(fileName, {
+      kind: ResourceVersionKind.Read,
+      scriptVersion: scriptInfo.getLatestVersion(),
+      projectVersion: this.project.getProjectVersion(),
+      modifiedTime,
+      fileSize,
+      contentHash,
+    });
+    return content;
   }
 
   getModifiedResourceFiles(): Set<string> | undefined {
     const modifiedFiles = new Set<string>();
+    const host = this.project.projectService.host;
+    const projectVersion = this.project.getProjectVersion();
     for (const [fileName, oldVersion] of this.lastReadResourceVersion) {
-      if (this.project.getScriptVersion(fileName) !== oldVersion) {
+      if (oldVersion.kind === ResourceVersionKind.Missing) {
+        if (host.fileExists(fileName)) {
+          this.lastReadResourceVersion.set(fileName, {
+            kind: ResourceVersionKind.Dependency,
+            projectVersion,
+            modifiedTime: host.getModifiedTime?.(fileName)?.getTime(),
+            fileSize: host.getFileSize?.(fileName),
+            contentHash: this.hashResourceContent(this.readResourceFromDisk(fileName)),
+          });
+          modifiedFiles.add(fileName);
+        }
+        continue;
+      }
+      if (oldVersion.kind === ResourceVersionKind.Dependency) {
+        if (!host.fileExists(fileName)) {
+          this.lastReadResourceVersion.set(fileName, {kind: ResourceVersionKind.Missing});
+          modifiedFiles.add(fileName);
+        } else {
+          const modifiedTime = host.getModifiedTime?.(fileName)?.getTime();
+          const fileSize = host.getFileSize?.(fileName);
+          if (
+            oldVersion.contentHash === undefined ||
+            modifiedTime === undefined ||
+            modifiedTime !== oldVersion.modifiedTime ||
+            fileSize !== oldVersion.fileSize ||
+            projectVersion !== oldVersion.projectVersion
+          ) {
+            const contentHash = this.hashResourceContent(this.readResourceFromDisk(fileName));
+            oldVersion.projectVersion = projectVersion;
+            oldVersion.modifiedTime = modifiedTime;
+            oldVersion.fileSize = fileSize;
+            if (oldVersion.contentHash !== undefined && contentHash !== oldVersion.contentHash) {
+              modifiedFiles.add(fileName);
+            }
+            oldVersion.contentHash = contentHash;
+          }
+        }
+        continue;
+      }
+      if (this.resourceDependencies.has(fileName) && !host.fileExists(fileName)) {
+        this.lastReadResourceVersion.set(fileName, {kind: ResourceVersionKind.Missing});
         modifiedFiles.add(fileName);
+        continue;
+      }
+      const scriptInfo = this.project.getScriptInfo(fileName);
+      if (scriptInfo === undefined || scriptInfo.getLatestVersion() !== oldVersion.scriptVersion) {
+        modifiedFiles.add(fileName);
+        continue;
+      }
+
+      if (oldVersion.contentHash === undefined || scriptInfo.isScriptOpen()) {
+        continue;
+      }
+
+      const modifiedTime = host.getModifiedTime?.(fileName)?.getTime();
+      const fileSize = host.getFileSize?.(fileName);
+      if (modifiedTime !== oldVersion.modifiedTime || fileSize !== oldVersion.fileSize) {
+        modifiedFiles.add(fileName);
+        continue;
+      }
+
+      // Recheck the hash once when the project version advances to catch edits with unchanged
+      // size and mtime (for example `cp -p` or same-length redirects). Between project updates,
+      // the stat fast path above skips disk reads. Hosts without file metadata check every call.
+      if (modifiedTime === undefined || projectVersion !== oldVersion.projectVersion) {
+        const contentHash = this.hashResourceContent(this.readResourceFromDisk(fileName));
+        oldVersion.projectVersion = projectVersion;
+        oldVersion.modifiedTime = modifiedTime;
+        oldVersion.fileSize = fileSize;
+        if (contentHash !== oldVersion.contentHash) {
+          // Missing manifests skip readResource. Update the hash here to detect later recreation.
+          oldVersion.contentHash = contentHash;
+          modifiedFiles.add(fileName);
+        }
       }
     }
     return modifiedFiles.size > 0 ? modifiedFiles : undefined;
   }
 
-  /**
-   * Records snapshot tokens for all Custom Elements Manifest resolution dependencies (resolved
-   * manifests, `package.json` files, and candidate paths that may not exist yet) without adding
-   * them as TypeScript project roots.
-   */
-  syncManifestSnapshots(paths: ReadonlySet<AbsoluteFsPath>): void {
-    this.lastManifestSnapshot.clear();
-    for (const filePath of paths) {
-      this.lastManifestSnapshot.set(filePath, this.getManifestSnapshotToken(filePath));
-    }
+  private hashResourceContent(content: string): string {
+    return this.project.projectService.host.createHash?.(content) ?? hashString(content);
   }
 
-  /**
-   * Returns any Custom Elements Manifest dependency paths whose snapshot changed (edited, created,
-   * or deleted) since the last sync.
-   */
-  getModifiedManifestFiles(paths: ReadonlySet<AbsoluteFsPath>): AbsoluteFsPath[] {
-    const modified: AbsoluteFsPath[] = [];
-    for (const filePath of paths) {
-      const prev = this.lastManifestSnapshot.get(filePath);
-      const curr = this.getManifestSnapshotToken(filePath);
-      if (prev !== curr) {
-        modified.push(filePath);
-      }
-    }
-    return modified;
-  }
-
-  private getManifestSnapshotToken(filePath: AbsoluteFsPath): string | null {
-    if (!this.fileExists(filePath)) {
-      return null;
-    }
-    const mtime = this.project.projectService.host.getModifiedTime?.(filePath);
-    if (mtime !== undefined) {
-      return `m:${mtime.getTime()}`;
-    }
-    const content = this.readFile(filePath);
-    if (content === undefined) {
-      return null;
-    }
-    const hash = this.project.projectService.host.createHash?.(content) ?? hashString(content);
-    return `h:${hash}`;
+  private readResourceFromDisk(fileName: string): string {
+    // Check existence because some hosts throw when reading a file deleted between requests.
+    // Read directly from the server host so closed ScriptInfo snapshots do not mask disk edits.
+    const host = this.project.projectService.host;
+    return host.fileExists(fileName) ? (host.readFile(fileName) ?? '') : '';
   }
 }
 

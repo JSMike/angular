@@ -19,6 +19,7 @@ export type ParsedManifestType =
       readonly checkType: CustomElementTypeExpr;
       readonly isLiteralUnion: boolean;
       readonly literalUnionType?: string;
+      readonly stringLiteralValues?: readonly string[];
       readonly isExternal: boolean;
       readonly usesUnreferencedGlobal: boolean;
     }
@@ -768,12 +769,16 @@ export function parseManifestType(
   }
 
   const literalValues = extractStringLiteralUnion(ast);
+  const dedupedLiterals = literalValues !== null ? Array.from(new Set(literalValues)) : null;
   return {
     ok: true,
     checkType: ast.expr,
-    isLiteralUnion: literalValues !== null,
-    ...(literalValues !== null
-      ? {literalUnionType: literalValues.map((v) => JSON.stringify(v)).join(' | ')}
+    isLiteralUnion: dedupedLiterals !== null,
+    ...(dedupedLiterals !== null
+      ? {
+          literalUnionType: dedupedLiterals.map((v) => JSON.stringify(v)).join(' | '),
+          stringLiteralValues: dedupedLiterals,
+        }
       : {}),
     isExternal,
     usesUnreferencedGlobal,

@@ -47,20 +47,12 @@ export class CompilerFactory {
       modifiedResourceFiles.add(resolve(fileName));
     }
 
-    if (this.compiler !== null) {
-      for (const fileName of this.adapter.getModifiedManifestFiles(
-        this.compiler.getCustomElementsManifestResolutionPaths(),
-      )) {
-        modifiedResourceFiles.add(fileName);
-      }
-    }
-
     if (this.compiler !== null && program === this.compiler.getCurrentProgram()) {
       if (modifiedResourceFiles.size > 0) {
         // Only resource files have changed since the last NgCompiler was created.
         const ticket = resourceChangeTicket(this.compiler, modifiedResourceFiles);
         this.compiler = NgCompiler.fromTicket(ticket, this.adapter);
-        this.adapter.syncManifestSnapshots(
+        this.adapter.syncResourceDependencies(
           this.compiler.getCustomElementsManifestResolutionPaths(),
         );
       } else {
@@ -94,7 +86,7 @@ export class CompilerFactory {
       );
     }
     this.compiler = NgCompiler.fromTicket(ticket, this.adapter);
-    this.adapter.syncManifestSnapshots(this.compiler.getCustomElementsManifestResolutionPaths());
+    this.adapter.syncResourceDependencies(this.compiler.getCustomElementsManifestResolutionPaths());
     return this.compiler;
   }
 }

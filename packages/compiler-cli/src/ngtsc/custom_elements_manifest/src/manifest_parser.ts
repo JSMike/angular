@@ -72,6 +72,11 @@ function typeTextOf(type: unknown): string | undefined {
   return isObject(type) && typeof type['text'] === 'string' ? type['text'] : undefined;
 }
 
+function trimmedTypeTextOf(type: unknown): string | undefined {
+  const text = typeTextOf(type)?.trim();
+  return text !== undefined && text.length > 0 ? text : undefined;
+}
+
 function declarationKey(modulePath: string, name: string): string {
   return `${modulePath.replace(/^(?:\.\/|\/)+/, '')}\0${name}`;
 }
@@ -318,6 +323,7 @@ function extractMembers(
   );
 
   const memberParsedTypes = new Map<string, ParsedManifestType>();
+  const inheritedMemberByAttr = new Map<string, string>();
   if (Array.isArray(declaration['members'])) {
     for (const member of declaration['members']) {
       if (!isObject(member) || member['kind'] !== 'field' || typeof member['name'] !== 'string') {
@@ -336,6 +342,7 @@ function extractMembers(
         member['readonly'] === true
       );
       const hasExplicitType = Object.prototype.hasOwnProperty.call(member, 'type');
+      const rawTypeText = hasExplicitType ? trimmedTypeTextOf(member['type']) : undefined;
       const parsed = hasExplicitType
         ? parseManifestType(member['type'], owningPackage, manifestRelativeDir, containingModule)
         : ({ok: false} as const);
@@ -348,9 +355,10 @@ function extractMembers(
       const defaultVal = typeof member['default'] === 'string' ? {default: member['default']} : {};
       if (typeof member['attribute'] === 'string' && member['attribute'].length > 0) {
         if (declaredAttributeNames.has(member['attribute'])) {
+          inheritedMemberByAttr.set(member['attribute'], memberName);
           target.attributes.set(member['attribute'], {
             name: member['attribute'],
-            ...attributeTypeFields(parsed, memberName),
+            ...attributeTypeFields(parsed, memberName, rawTypeText),
             ...docs,
             ...defaultVal,
           });
@@ -367,6 +375,7 @@ function extractMembers(
       target.properties.set(memberName, {
         name: memberName,
         ...propertyCheckTypeMetadata(parsed),
+        ...(rawTypeText !== undefined ? {typeText: rawTypeText} : {}),
         ...docs,
         ...defaultVal,
       });
@@ -380,6 +389,7 @@ function extractMembers(
       }
       const attrName = attr['name'];
       const inherited = target.attributes.get(attrName);
+      const inheritedField = inheritedMemberByAttr.get(attrName);
       const hasExplicitType = Object.prototype.hasOwnProperty.call(attr, 'type');
       const requestedField =
         typeof attr['fieldName'] === 'string' && attr['fieldName'].length > 0
@@ -396,14 +406,15 @@ function extractMembers(
 
       const linkedMember =
         relatedMember ??
-        (inherited?.property === undefined ? undefined : membersByName.get(inherited.property));
+        (inheritedField === undefined ? undefined : membersByName.get(inheritedField));
       const repeatsLinked =
         hasValidField && hasExplicitType && repeatsMemberType(attr['type'], linkedMember?.['type']);
       const hasOwnType = hasExplicitType && !repeatsLinked;
-      const linkedProp = hasOwnType ? undefined : (requestedField ?? inherited?.property);
+      const linkedProp = hasOwnType ? undefined : (requestedField ?? inheritedField);
 
       let typeFields: Partial<CustomElementAttributeSchema> = {};
       if (hasOwnType) {
+        const ownTypeText = trimmedTypeTextOf(attr['type']);
         const parsed = parseManifestType(
           attr['type'],
           owningPackage,
@@ -413,10 +424,14 @@ function extractMembers(
         if (!parsed.ok) {
           warnings.push(`unsupported type on attribute '${tagName}.${attrName}'`);
         }
-        typeFields = attributeTypeFields(parsed, undefined);
+        typeFields = attributeTypeFields(parsed, undefined, ownTypeText);
       } else if (hasValidField && linkedProp !== undefined) {
         const linkedParsed = memberParsedTypes.get(linkedProp) ?? ({ok: false} as const);
-        typeFields = attributeTypeFields(linkedParsed, linkedProp);
+        const linkedTypeText =
+          linkedMember !== undefined
+            ? trimmedTypeTextOf(linkedMember['type'])
+            : inherited?.typeText;
+        typeFields = attributeTypeFields(linkedParsed, linkedProp, linkedTypeText);
       }
 
       const docs = {...(inherited ? stripAttrType(inherited) : {}), ...readDocs(attr)};
@@ -442,6 +457,7 @@ function extractMembers(
         continue;
       }
       const hasExplicitType = Object.prototype.hasOwnProperty.call(event, 'type');
+      const rawTypeText = hasExplicitType ? trimmedTypeTextOf(event['type']) : undefined;
       const parsed = hasExplicitType
         ? parseManifestType(event['type'], owningPackage, manifestRelativeDir, containingModule)
         : ({ok: false} as const);
@@ -454,6 +470,7 @@ function extractMembers(
         // placeholders like `void` or `boolean` would mask native DOM event inference (e.g.
         // `MouseEvent` for `click`).
         ...(parsed.ok && parsed.isExternal ? checkTypeMetadata(parsed) : {}),
+        ...(rawTypeText !== undefined ? {typeText: rawTypeText} : {}),
         ...readDocs(event),
       });
     }
@@ -482,7 +499,7 @@ function checkTypeMetadata(parsed: ParsedManifestType): CustomElementCheckTypeMe
 
 /**
  * Computes attribute checkType + property fallback fields.
- * - Pure string literal union: direct checkType (no class fallback needed).
+ * - Pure string literal union: direct checkType + stringLiteralValues (no class fallback needed).
  * - External/imported type: checkType + optional linked property fallback.
  * - Other valid non-string type (e.g. `boolean`, `number`, `string`): omit both (no static check).
  * - Missing/unusable type: keep linked property so TCB infers string literals from the class.
@@ -490,23 +507,33 @@ function checkTypeMetadata(parsed: ParsedManifestType): CustomElementCheckTypeMe
 function attributeTypeFields(
   parsed: ParsedManifestType,
   linkedProperty: string | undefined,
+  typeText: string | undefined,
 ): Partial<CustomElementAttributeSchema> {
+  const displayType = typeText !== undefined ? {typeText} : {};
   if (parsed.ok) {
     if (parsed.isLiteralUnion && parsed.literalUnionType !== undefined) {
       return {
+        ...displayType,
         checkType: parsed.literalUnionType,
         checkTypeIsLiteralUnion: true,
+        ...(parsed.stringLiteralValues !== undefined
+          ? {stringLiteralValues: parsed.stringLiteralValues}
+          : {}),
       };
     }
     if (parsed.isExternal) {
       return {
+        ...displayType,
         ...checkTypeMetadata(parsed),
         ...(linkedProperty !== undefined ? {property: linkedProperty} : {}),
       };
     }
-    return {};
+    return displayType;
   }
-  return linkedProperty !== undefined ? {property: linkedProperty} : {};
+  return {
+    ...displayType,
+    ...(linkedProperty !== undefined ? {property: linkedProperty} : {}),
+  };
 }
 
 function stripAttrType(

@@ -6,6 +6,8 @@
  * found in the LICENSE file at https://angular.dev/license
  */
 
+import {TmplAstElement} from '@angular/compiler';
+import {customElementsManifest} from '@angular/compiler-cli/src/ngtsc/custom_elements_manifest/testing';
 import ts from 'typescript';
 
 import {
@@ -2281,6 +2283,748 @@ describe('completions', () => {
       appFile.moveCursorToText(`'ti¦'`);
       const completions = appFile.getCompletionsAtPosition();
       expectContain(completions, ts.ScriptElementKind.memberVariableElement, ['title', 'hero']);
+    });
+  });
+
+  describe('native binding name completion compatibility', () => {
+    for (const binding of ['[tit]', '[attr.tit]', '[class.tit]', '[(tit)]']) {
+      it(`should retain native property snippets in an empty ${binding} binding`, () => {
+        const {templateFile} = setup(`<input ${binding}="">`, '');
+        templateFile.moveCursorToText('tit¦');
+        const completions = templateFile.getCompletionsAtPosition({
+          includeCompletionsWithSnippetText: true,
+          includeCompletionsWithInsertText: true,
+        });
+        const entry = completions?.entries.find((entry) => entry.name === '[title]');
+        expect(entry?.insertText).toBe('[title]="$1"');
+        expect(entry?.isSnippet).toBe(true);
+      });
+    }
+
+    for (const snippets of [false, true]) {
+      it(`should retain directive completions in a populated native attr binding with snippets=${snippets}`, () => {
+        const {templateFile} = setup(`<input dir [attr.my]="'value'">`, '', DIR_WITH_INPUT);
+        templateFile.moveCursorToText('attr.my¦');
+        const completions = templateFile.getCompletionsAtPosition({
+          includeCompletionsWithSnippetText: snippets,
+          includeCompletionsWithInsertText: snippets,
+        });
+        const entry = completions?.entries.find((entry) => entry.name === 'myInput');
+        expect(entry).toBeDefined();
+        expect(entry?.isSnippet).toBeUndefined();
+        expect(entry?.replacementSpan).toEqual({
+          start: templateFile.contents.indexOf('attr.my'),
+          length: 'attr.my'.length,
+        });
+      });
+    }
+  });
+
+  describe('custom elements manifest completions', () => {
+    function setupWithManifest(
+      template: string,
+      withAngularComponent = false,
+      strictAttributeTypes?: boolean,
+      directive = '',
+    ): OpenBuffer {
+      const manifest = customElementsManifest({
+        tagName: 'my-button',
+        description: 'A themed button.',
+        members: [
+          {
+            kind: 'field',
+            name: 'label',
+            type: {text: 'string'},
+            description: 'The button label.',
+          },
+          {
+            kind: 'field',
+            name: 'disabled',
+            type: {text: 'boolean'},
+            description: 'Whether the button is disabled.',
+            deprecated: 'Use aria-disabled instead.',
+          },
+          {
+            kind: 'field',
+            name: 'readonly',
+            attribute: 'readonly',
+            type: {text: 'boolean'},
+          },
+          {
+            kind: 'field',
+            name: 'variant',
+            attribute: 'variant',
+            type: {text: "'primary' | 'secondary'"},
+            description: 'The button variant.',
+            default: 'primary',
+          },
+        ],
+        attributes: [
+          {
+            name: 'button-label',
+            fieldName: 'label',
+            description: 'The label attribute.',
+          },
+          {name: 'label', description: 'The same-named label attribute.'},
+          {name: 'data-mode', description: 'Attribute only.'},
+          {name: 'title', description: 'The title attribute.'},
+          {name: 'readonly', fieldName: 'readonly'},
+          {
+            name: 'variant',
+            fieldName: 'variant',
+            type: {text: "'primary' | 'secondary'"},
+            description: 'The variant attribute.',
+            default: 'primary',
+          },
+        ],
+        events: [
+          {name: 'itemselect', type: {text: 'UnresolvedItemSelectEvent'}, deprecated: true},
+          {
+            name: 'click',
+            type: {
+              text: 'CustomEvent<{value: string}>',
+              references: [{name: 'CustomEvent', package: 'global:', start: 0, end: 11}],
+            },
+            description: 'Fired when the custom button activates.',
+          },
+          {name: 'labelChange', type: {text: 'unknown'}},
+          {name: 'label', type: {text: 'unknown'}, description: 'The label event.'},
+        ],
+      });
+      const env = getSharedEnv();
+      const imports: string[] = [];
+      if (withAngularComponent) {
+        imports.push('AngularButton');
+      }
+      if (directive) {
+        imports.push('Wrapper');
+      }
+      const project = env.addProject(
+        'test-cem',
+        {
+          'custom-elements.json': JSON.stringify(manifest),
+          'test.ts': `
+            import {Component, Directive, Input} from '@angular/core';
+
+            ${
+              withAngularComponent
+                ? `@Component({selector: 'my-button', template: ''})
+                   export class AngularButton {
+                     @Input('variant') angularVariant: 'angular-only' = 'angular-only';
+                   }`
+                : ''
+            }
+
+            ${directive}
+
+            @Component({
+              templateUrl: './test.html',
+              selector: 'app-cmp',
+              imports: [${imports.join(', ')}],
+            })
+            export class AppCmp {}
+          `,
+          'test.html': template,
+        },
+        {
+          customElementsManifests: ['./custom-elements.json'],
+          ...(strictAttributeTypes === undefined ? {} : {strictAttributeTypes}),
+        },
+      );
+      return project.openFile('test.html');
+    }
+
+    it('should return tag completions for manifest-declared elements but not DOM elements', () => {
+      const templateFile = setupWithManifest(`<my-b`);
+      templateFile.moveCursorToText('<my-b¦');
+      const completions = templateFile.getCompletionsAtPosition();
+      expectContain(
+        completions,
+        unsafeCastDisplayInfoKindToScriptElementKind(DisplayInfoKind.ELEMENT),
+        ['my-button'],
+      );
+      expectDoesNotContain(
+        completions,
+        unsafeCastDisplayInfoKindToScriptElementKind(DisplayInfoKind.ELEMENT),
+        ['div', 'span'],
+      );
+    });
+
+    it('should prefer an Angular component over a manifest entry with the same tag', () => {
+      const templateFile = setupWithManifest(`<my-b`, true);
+      templateFile.moveCursorToText('<my-b¦');
+      const completions = templateFile.getCompletionsAtPosition();
+      expectContain(
+        completions,
+        unsafeCastDisplayInfoKindToScriptElementKind(DisplayInfoKind.COMPONENT),
+        ['my-button'],
+      );
+    });
+
+    it('should return property completions for manifest-declared members', () => {
+      const templateFile = setupWithManifest(`<my-button ></my-button>`);
+      templateFile.moveCursorToText('<my-button ¦>');
+      const completions = templateFile.getCompletionsAtPosition();
+      expectContain(
+        completions,
+        unsafeCastDisplayInfoKindToScriptElementKind(DisplayInfoKind.PROPERTY),
+        ['[label]', '[disabled]', '[readonly]'],
+      );
+      expectDoesNotContain(
+        completions,
+        unsafeCastDisplayInfoKindToScriptElementKind(DisplayInfoKind.PROPERTY),
+        ['[readOnly]'],
+      );
+    });
+
+    it('should distinguish manifest attributes from property bindings in completions', () => {
+      const templateFile = setupWithManifest(`<my-button ></my-button>`);
+      templateFile.moveCursorToText('<my-button ¦>');
+      const completions = templateFile.getCompletionsAtPosition()!;
+      const names = completions.entries.map((entry) => entry.name);
+      expect(names).toContain('button-label');
+      expect(names).toContain('data-mode');
+      expect(names).toContain('[attr.button-label]');
+      expect(names).toContain('[attr.data-mode]');
+      expect(names).toContain('[label]');
+      expect(names).not.toContain('[button-label]');
+      expect(names).not.toContain('[data-mode]');
+    });
+
+    it('should return event completions for manifest-declared and inherited events', () => {
+      const templateFile = setupWithManifest(`<my-button ></my-button>`);
+      templateFile.moveCursorToText('<my-button ¦>');
+      const completions = templateFile.getCompletionsAtPosition();
+      expectContain(completions, DisplayInfoKind.EVENT, ['(itemselect)', '(focus)']);
+    });
+
+    for (const snippets of [false, true]) {
+      it(`should complete an existing manifest property binding with snippets=${snippets}`, () => {
+        const templateFile = setupWithManifest(`<my-button [lab]="'text'"></my-button>`);
+        templateFile.moveCursorToText('[lab¦]');
+        const completions = templateFile.getCompletionsAtPosition({
+          includeCompletionsWithSnippetText: snippets,
+          includeCompletionsWithInsertText: snippets,
+        })!;
+        const entry = completions.entries.find((entry) => entry.name === 'label')!;
+        expect(entry).toBeDefined();
+        const {start, length} = entry.replacementSpan!;
+        expect(templateFile.contents.slice(start, start + length)).toBe('lab');
+        expect(toText(templateFile.getCompletionEntryDetails('label')!.documentation)).toBe(
+          'The button label.',
+        );
+        expect(completions.entries.some((entry) => entry.name.includes('data-mode'))).toBe(false);
+      });
+
+      it(`should complete an existing manifest attribute binding with snippets=${snippets}`, () => {
+        const templateFile = setupWithManifest(
+          `<my-button [attr.button-lab]="'text'"></my-button>`,
+        );
+        templateFile.moveCursorToText('[attr.button-lab¦]');
+        const completions = templateFile.getCompletionsAtPosition({
+          includeCompletionsWithSnippetText: snippets,
+          includeCompletionsWithInsertText: snippets,
+        })!;
+        const entry = completions.entries.find((entry) => entry.name === 'attr.button-label')!;
+        expect(entry).toBeDefined();
+        const {start, length} = entry.replacementSpan!;
+        expect(templateFile.contents.slice(start, start + length)).toBe('attr.button-lab');
+        expect(toText(templateFile.getCompletionEntryDetails(entry.name)!.documentation)).toBe(
+          'The label attribute.',
+        );
+        expect(completions.entries.every((entry) => entry.name.startsWith('attr.'))).toBe(true);
+      });
+    }
+
+    it('should retain attribute syntax when completing an empty binding with a snippet', () => {
+      const templateFile = setupWithManifest(`<my-button [attr.data-m]=""></my-button>`);
+      templateFile.moveCursorToText('[attr.data-m¦]');
+      const completions = templateFile.getCompletionsAtPosition({
+        includeCompletionsWithSnippetText: true,
+        includeCompletionsWithInsertText: true,
+      })!;
+      const entry = completions.entries.find((entry) => entry.name === '[attr.data-mode]')!;
+      expect(entry.insertText).toBe('[attr.data-mode]="$1"');
+      const {start, length} = entry.replacementSpan!;
+      expect(templateFile.contents.slice(start, start + length)).toBe('[attr.data-m]=""');
+    });
+
+    it('should preserve property and event completions with the same name and their documentation', () => {
+      const templateFile = setupWithManifest(`<my-button ></my-button>`);
+      templateFile.moveCursorToText('<my-button ¦>');
+      const completions = templateFile.getCompletionsAtPosition();
+      expectContain(completions, DisplayInfoKind.PROPERTY, ['[label]']);
+      expectContain(completions, DisplayInfoKind.EVENT, ['(label)']);
+      expect(toText(templateFile.getCompletionEntryDetails('[label]')!.documentation)).toBe(
+        'The button label.',
+      );
+      expect(toText(templateFile.getCompletionEntryDetails('(label)')!.documentation)).toBe(
+        'The label event.',
+      );
+    });
+
+    it('should preserve inherited properties when the manifest adds attribute metadata', () => {
+      const templateFile = setupWithManifest(`<my-button ></my-button>`);
+      templateFile.moveCursorToText('<my-button ¦>');
+      const names = templateFile.getCompletionsAtPosition()!.entries.map((entry) => entry.name);
+      expect(names).toContain('title');
+      expect(names).toContain('[attr.title]');
+      expect(names).toContain('[title]');
+      expect(toText(templateFile.getCompletionEntryDetails('title')!.documentation)).toBe(
+        'The title attribute.',
+      );
+    });
+
+    it('should retain same-named event completions while editing an event binding', () => {
+      const templateFile = setupWithManifest(`<my-button (label)=""></my-button>`);
+      templateFile.moveCursorToText('(lab¦el)');
+      const completions = templateFile.getCompletionsAtPosition()!;
+      expectContain(completions, DisplayInfoKind.EVENT, ['(label)']);
+      expect(toText(templateFile.getCompletionEntryDetails('(label)')!.documentation)).toBe(
+        'The label event.',
+      );
+    });
+
+    it('should mark deprecated manifest properties and events in completions', () => {
+      const templateFile = setupWithManifest(`<my-button ></my-button>`);
+      templateFile.moveCursorToText('<my-button ¦>');
+      const completions = templateFile.getCompletionsAtPosition()!;
+      const entryByName = new Map(completions.entries.map((entry) => [entry.name, entry]));
+      expect(entryByName.get('[disabled]')!.kindModifiers).toBe(
+        ts.ScriptElementKindModifier.deprecatedModifier,
+      );
+      expect(entryByName.get('(itemselect)')!.kindModifiers).toBe(
+        ts.ScriptElementKindModifier.deprecatedModifier,
+      );
+      // Entries without manifest deprecation are unmarked.
+      expect(entryByName.get('[label]')!.kindModifiers).toBeUndefined();
+      expect(entryByName.get('(click)')!.kindModifiers).toBeUndefined();
+    });
+
+    it('should include manifest documentation in completion details', () => {
+      const templateFile = setupWithManifest(`<my-button ></my-button>`);
+      templateFile.moveCursorToText('<my-button ¦>');
+      templateFile.getCompletionsAtPosition();
+
+      const labelAttributeDetails = templateFile.getCompletionEntryDetails('label')!;
+      expect(labelAttributeDetails).toBeDefined();
+      expect(ts.displayPartsToString(labelAttributeDetails.documentation!)).toEqual(
+        'The same-named label attribute.',
+      );
+
+      const disabledDetails = templateFile.getCompletionEntryDetails('[disabled]')!;
+      expect(disabledDetails.tags).toEqual([
+        jasmine.objectContaining({
+          name: 'deprecated',
+          text: [{kind: 'text', text: 'Use aria-disabled instead.'}],
+        }),
+      ]);
+
+      const variantDetails = templateFile.getCompletionEntryDetails('[variant]')!;
+      expect(ts.displayPartsToString(variantDetails.displayParts)).toEqual(
+        `[variant]: 'primary' | 'secondary'`,
+      );
+      expect(ts.displayPartsToString(variantDetails.documentation!)).toContain('Default: primary');
+
+      // Display the manifest type text even when it cannot be used for checking.
+      // Diagnostics use only validated check types.
+      const eventDetails = templateFile.getCompletionEntryDetails('(itemselect)')!;
+      expect(ts.displayPartsToString(eventDetails.displayParts)).toEqual(
+        `(itemselect): UnresolvedItemSelectEvent`,
+      );
+
+      const clickDetails = templateFile.getCompletionEntryDetails('(click)')!;
+      expect(ts.displayPartsToString(clickDetails.displayParts)).toEqual(
+        `(click): CustomEvent<{value: string}>`,
+      );
+      expect(ts.displayPartsToString(clickDetails.documentation!)).toBe(
+        'Fired when the custom button activates.',
+      );
+    });
+
+    it('should complete literal union values for static manifest attributes', () => {
+      const templateFile = setupWithManifest(`<my-button variant=""></my-button>`);
+      templateFile.moveCursorToText('variant="¦"');
+      const completions = templateFile.getCompletionsAtPosition();
+      expectContain(completions, ts.ScriptElementKind.string, ['primary', 'secondary']);
+    });
+
+    for (const strictAttributeTypes of [true, false]) {
+      it(`should replace a partial manifest literal with strictAttributeTypes=${strictAttributeTypes}`, () => {
+        const template = `<my-button variant="pri"></my-button>`;
+        const templateFile = setupWithManifest(template, false, strictAttributeTypes);
+        templateFile.moveCursorToText('variant="pri¦"');
+        const completions = templateFile.getCompletionsAtPosition()!;
+        expectContain(completions, ts.ScriptElementKind.string, ['primary', 'secondary']);
+        expectReplacementText(completions, template, 'pri');
+        const entry = completions.entries.find((entry) => entry.name === 'primary')!;
+        const {start, length} = entry.replacementSpan!;
+        expect(template.slice(0, start) + entry.name + template.slice(start + length)).toBe(
+          `<my-button variant="primary"></my-button>`,
+        );
+      });
+
+      for (const owner of ['component', 'directive']) {
+        it(`should exclude manifest literals owned by an aliased ${owner} input with strictAttributeTypes=${strictAttributeTypes}`, () => {
+          const templateFile = setupWithManifest(
+            `<my-button wrapper variant=""></my-button>`,
+            owner === 'component',
+            strictAttributeTypes,
+            owner === 'directive'
+              ? `
+              @Directive({selector: '[wrapper]'})
+              export class Wrapper {
+                @Input('variant') angularVariant: 'angular-only' = 'angular-only';
+              }
+            `
+              : '',
+          );
+          templateFile.moveCursorToText('variant="¦"');
+          const completions = templateFile.getCompletionsAtPosition();
+          const names = completions?.entries.map((entry) => entry.name) ?? [];
+          expect(names).not.toContain('primary');
+          expect(names).not.toContain('secondary');
+          if (strictAttributeTypes) {
+            expect(names).toContain('angular-only');
+          }
+        });
+      }
+    }
+
+    it('should retain manifest literals when a matching directive does not own the input', () => {
+      const templateFile = setupWithManifest(
+        `<my-button wrapper variant=""></my-button>`,
+        false,
+        false,
+        `@Directive({selector: '[wrapper]'}) export class Wrapper { @Input() other = ''; }`,
+      );
+      templateFile.moveCursorToText('variant="¦"');
+      expectContain(templateFile.getCompletionsAtPosition(), ts.ScriptElementKind.string, [
+        'primary',
+        'secondary',
+      ]);
+    });
+
+    for (const alias of ["'primary' | 'secondary'", "Lowercase<'PRIMARY' | 'SECONDARY'>"]) {
+      it(`should complete referenced static literal union ${alias} when package is imported`, () => {
+        const manifest = customElementsManifest({
+          tagName: 'button-box',
+          name: 'Button',
+          path: 'button.js',
+          members: [
+            {
+              kind: 'field',
+              name: 'variant',
+              attribute: 'variant',
+              type: {
+                text: 'ButtonVariant',
+                references: [{name: 'ButtonVariant', module: 'button.js', start: 0, end: 13}],
+              },
+            },
+          ],
+          attributes: [{name: 'variant', fieldName: 'variant'}],
+          exports: [
+            {kind: 'js', name: 'Button', declaration: {name: 'Button'}},
+            {
+              kind: 'custom-element-definition',
+              name: 'button-box',
+              declaration: {name: 'Button'},
+            },
+          ],
+        });
+        const project = getSharedEnv().addProject(
+          'test-cem-reference-completion',
+          {
+            'node_modules/@test/elements/package.json': JSON.stringify({
+              name: '@test/elements',
+              customElements: './custom-elements.json',
+              exports: {
+                './package.json': './package.json',
+                './button.js': {
+                  types: './button/index.d.ts',
+                  default: './button.js',
+                },
+              },
+            }),
+            'node_modules/@test/elements/custom-elements.json': JSON.stringify(manifest),
+            'node_modules/@test/elements/button/index.d.ts': `export * from './button';`,
+            'node_modules/@test/elements/button/button.d.ts': `
+            export type ButtonVariant = ${alias};
+            export declare class Button extends HTMLElement {
+              variant?: ButtonVariant;
+            }
+          `,
+            'test.ts': `
+            import {Component} from '@angular/core';
+            import '@test/elements/button.js';
+
+            @Component({templateUrl: './test.html'})
+            export class AppCmp {}
+          `,
+            'test.html': `<button-box variant=""></button-box>`,
+          },
+          {customElementsManifests: ['@test/elements']},
+        );
+        const templateFile = project.openFile('test.html');
+        templateFile.moveCursorToText('variant="¦"');
+
+        const completions = templateFile.getCompletionsAtPosition();
+        expectContain(completions, ts.ScriptElementKind.string, ['primary', 'secondary']);
+      });
+    }
+
+    it('should include manifest documentation in tag completion details', () => {
+      const templateFile = setupWithManifest(`<my-b`);
+      templateFile.moveCursorToText('<my-b¦');
+      templateFile.getCompletionsAtPosition();
+      const details = templateFile.getCompletionEntryDetails('my-button')!;
+      expect(details).toBeDefined();
+      expect(ts.displayPartsToString(details.documentation!)).toEqual('A themed button.');
+    });
+
+    it('should keep [attr.*] manifest completion and details when a directive owns the same input name', () => {
+      const directive = `
+        @Directive({selector: '[wrapper]'})
+        export class Wrapper {
+          /** Directive variant input. */
+          @Input('variant') angularVariant: 'angular-only' = 'angular-only';
+        }
+      `;
+      const attrBindingFile = setupWithManifest(
+        `<my-button wrapper [attr.var]="'x'"></my-button>`,
+        false,
+        true,
+        directive,
+      );
+      attrBindingFile.moveCursorToText('[attr.var¦]');
+      const attrCompletions = attrBindingFile.getCompletionsAtPosition()!;
+      expect(attrCompletions.entries.some((entry) => entry.name === 'attr.variant')).toBe(true);
+      expect(
+        ts.displayPartsToString(
+          attrBindingFile.getCompletionEntryDetails('attr.variant')!.documentation!,
+        ),
+      ).toContain('The variant attribute.');
+
+      const elementFile = setupWithManifest(
+        `<my-button wrapper ></my-button>`,
+        false,
+        true,
+        directive,
+      );
+      elementFile.moveCursorToText('<my-button wrapper ¦>');
+      const elementCompletions = elementFile.getCompletionsAtPosition()!;
+      const names = elementCompletions.entries.map((entry) => entry.name);
+      expect(names).toContain('[variant]');
+      expect(names).toContain('[attr.variant]');
+      expect(
+        ts.displayPartsToString(elementFile.getCompletionEntryDetails('[variant]')!.documentation!),
+      ).toContain('Directive variant input.');
+      expect(
+        ts.displayPartsToString(
+          elementFile.getCompletionEntryDetails('[attr.variant]')!.documentation!,
+        ),
+      ).toContain('The variant attribute.');
+    });
+
+    it('should HTML-escape manifest literal insertions and replace raw entity spans cleanly', () => {
+      const manifest = customElementsManifest({
+        tagName: 'quote-box',
+        attributes: [
+          {
+            name: 'mode',
+            type: {text: `'say "hi"' | "it's ok" | 'a&b'`},
+          },
+        ],
+      });
+      const env = getSharedEnv();
+      const template = `<quote-box mode="a&amp;b"></quote-box><quote-box mode=''></quote-box>`;
+      const project = env.addProject(
+        'test-cem-escaped-literals',
+        {
+          'custom-elements.json': JSON.stringify(manifest),
+          'test.ts': `
+            import {Component} from '@angular/core';
+            @Component({templateUrl: './test.html'})
+            export class AppCmp {}
+          `,
+          'test.html': template,
+        },
+        {customElementsManifests: ['./custom-elements.json']},
+      );
+      const file = project.openFile('test.html');
+
+      file.moveCursorToText('mode="a&amp;b¦"');
+      const doubleQuoted = file.getCompletionsAtPosition()!;
+      const quoteEntry = doubleQuoted.entries.find((entry) => entry.name === 'say "hi"')!;
+      expect(quoteEntry).toBeDefined();
+      expect(quoteEntry.insertText).toBe('say &quot;hi&quot;');
+      const {start, length} = quoteEntry.replacementSpan!;
+      expect(template.slice(start, start + length)).toBe('a&amp;b');
+      expect(
+        template.slice(0, start) +
+          (quoteEntry.insertText ?? quoteEntry.name) +
+          template.slice(start + length),
+      ).toBe(`<quote-box mode="say &quot;hi&quot;"></quote-box><quote-box mode=''></quote-box>`);
+
+      const ampEntry = doubleQuoted.entries.find((entry) => entry.name === 'a&b')!;
+      expect(ampEntry.insertText).toBe('a&amp;b');
+
+      file.moveCursorToText("mode='¦'");
+      const singleQuoted = file.getCompletionsAtPosition()!;
+      const aposEntry = singleQuoted.entries.find((entry) => entry.name === "it's ok")!;
+      expect(aposEntry).toBeDefined();
+      expect(aposEntry.insertText).toBe('it&apos;s ok');
+      expect(
+        singleQuoted.entries.find((entry) => entry.name === 'say "hi"')!.insertText,
+      ).toBeUndefined();
+    });
+
+    it('should keep inline template literals valid when accepting manifest literal completions', () => {
+      const manifest = customElementsManifest({
+        tagName: 'quote-box',
+        members: [
+          {
+            kind: 'field',
+            name: 'mode',
+            attribute: 'mode',
+            type: {text: `"it's ok" | 'say "hi"' | 'a\`b\${c}' | '{{label}}' | '' | 'compact'`},
+          },
+        ],
+        attributes: [
+          {
+            name: 'mode',
+            fieldName: 'mode',
+            type: {text: `"it's ok" | 'say "hi"' | 'a\`b\${c}' | '{{label}}' | '' | 'compact'`},
+          },
+        ],
+      });
+      const env = getSharedEnv();
+      const applyCompletion = (
+        content: string,
+        cursorOffset: number,
+        entry: ts.CompletionEntry,
+      ): string => {
+        const text = entry.insertText ?? entry.name;
+        if (entry.replacementSpan !== undefined) {
+          const {start, length} = entry.replacementSpan;
+          return content.slice(0, start) + text + content.slice(start + length);
+        }
+        return content.slice(0, cursorOffset) + text + content.slice(cursorOffset);
+      };
+
+      const project = env.addProject(
+        'test-cem-inline-escaped-literals',
+        {
+          'custom-elements.json': JSON.stringify(manifest),
+          'single.ts': `
+            import {Component} from '@angular/core';
+            @Component({template: '<quote-box mode=""></quote-box>'})
+            export class SingleCmp {}
+          `,
+          'backtick.ts': `
+            import {Component} from '@angular/core';
+            @Component({template: \`<quote-box mode=""></quote-box>\`})
+            export class BacktickCmp {}
+          `,
+          'double.ts': `
+            import {Component} from '@angular/core';
+            @Component({template: "<quote-box mode=''></quote-box>"})
+            export class DoubleCmp {}
+          `,
+          'unquoted.html': `<quote-box mode=compact></quote-box>`,
+          'unquoted.ts': `
+            import {Component} from '@angular/core';
+            @Component({templateUrl: './unquoted.html'})
+            export class UnquotedCmp {}
+          `,
+        },
+        {strictTemplates: true, customElementsManifests: ['./custom-elements.json']},
+      );
+
+      const parsedAttributeValue = (fileName: string, className: string): string | undefined => {
+        const compiler = project.ngLS.compilerFactory.getOrCreate();
+        const sf = compiler.getCurrentProgram().getSourceFile(project.getAbsFileName(fileName))!;
+        const cls = sf.statements.find(
+          (stmt): stmt is ts.ClassDeclaration =>
+            ts.isClassDeclaration(stmt) && stmt.name?.text === className,
+        )!;
+        const nodes = compiler.getTemplateTypeChecker().getTemplate(cls)!;
+        const element = nodes.find(
+          (node): node is TmplAstElement => node instanceof TmplAstElement,
+        );
+        return element?.attributes[0]?.value;
+      };
+
+      // Single-quoted inline template with double-quoted HTML attribute inserting `it's ok`.
+      // Static attribute completions omit `{{label}}` (which Angular would parse as interpolation).
+      const singleFile = project.openFile('single.ts');
+      singleFile.moveCursorToText('mode="¦"');
+      const singleCompletions = singleFile.getCompletionsAtPosition()!;
+      expect(singleCompletions.entries.some((entry) => entry.name === '{{label}}')).toBe(false);
+      const singleEntry = singleCompletions.entries.find((entry) => entry.name === "it's ok")!;
+      expect(singleEntry.insertText).toBe("it\\'s ok");
+      singleFile.contents = applyCompletion(singleFile.contents, singleFile.cursor, singleEntry);
+      expect(singleFile.contents).toContain(`template: '<quote-box mode="it\\'s ok"></quote-box>'`);
+      expect(project.getDiagnosticsForFile('single.ts')).toEqual([]);
+      expect(parsedAttributeValue('single.ts', 'SingleCmp')).toBe("it's ok");
+
+      // Backtick inline template inserting `` a`b${c} ``.
+      const backtickFile = project.openFile('backtick.ts');
+      backtickFile.moveCursorToText('mode="¦"');
+      const backtickEntry = backtickFile
+        .getCompletionsAtPosition()!
+        .entries.find((entry) => entry.name === 'a`b${c}')!;
+      expect(backtickEntry.insertText).toBe('a\\`b\\${c}');
+      backtickFile.contents = applyCompletion(
+        backtickFile.contents,
+        backtickFile.cursor,
+        backtickEntry,
+      );
+      expect(backtickFile.contents).toContain(
+        'template: `<quote-box mode="a\\`b\\${c}"></quote-box>`',
+      );
+      expect(project.getDiagnosticsForFile('backtick.ts')).toEqual([]);
+      expect(parsedAttributeValue('backtick.ts', 'BacktickCmp')).toBe('a`b${c}');
+
+      // Double-quoted inline template with single-quoted HTML attribute inserting `say "hi"`.
+      const doubleFile = project.openFile('double.ts');
+      doubleFile.moveCursorToText("mode='¦'");
+      const doubleEntry = doubleFile
+        .getCompletionsAtPosition()!
+        .entries.find((entry) => entry.name === 'say "hi"')!;
+      expect(doubleEntry.insertText).toBe('say \\"hi\\"');
+      doubleFile.contents = applyCompletion(doubleFile.contents, doubleFile.cursor, doubleEntry);
+      expect(doubleFile.contents).toContain(
+        `template: "<quote-box mode='say \\"hi\\"'></quote-box>"`,
+      );
+      expect(project.getDiagnosticsForFile('double.ts')).toEqual([]);
+      expect(parsedAttributeValue('double.ts', 'DoubleCmp')).toBe('say "hi"');
+
+      // Unquoted HTML attribute selecting empty string inserts `""` instead of breaking `mode=`.
+      const unquotedFile = project.openFile('unquoted.html');
+      unquotedFile.moveCursorToText('mode=compa¦ct');
+      const unquotedCompletions = unquotedFile.getCompletionsAtPosition()!;
+      expect(unquotedCompletions.entries.some((entry) => entry.name === '{{label}}')).toBe(false);
+      const emptyEntry = unquotedCompletions.entries.find((entry) => entry.name === '')!;
+      expect(emptyEntry.insertText).toBe('""');
+      unquotedFile.contents = applyCompletion(
+        unquotedFile.contents,
+        unquotedFile.cursor,
+        emptyEntry,
+      );
+      expect(unquotedFile.contents).toBe('<quote-box mode=""></quote-box>');
+      expect(project.getDiagnosticsForFile('unquoted.html')).toEqual([]);
+      expect(parsedAttributeValue('unquoted.ts', 'UnquotedCmp')).toBe('');
+
+      // Property bindings still allow `{{label}}` because it is a TypeScript string literal, not
+      // HTML attribute interpolation.
+      unquotedFile.contents = `<quote-box [mode]="''"></quote-box>`;
+      unquotedFile.moveCursorToText(`[mode]="'¦'"`);
+      expect(
+        unquotedFile
+          .getCompletionsAtPosition()!
+          .entries.some((entry) => entry.name === '{{label}}'),
+      ).toBe(true);
     });
   });
 });

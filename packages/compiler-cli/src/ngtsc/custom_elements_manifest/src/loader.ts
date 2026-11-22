@@ -96,6 +96,7 @@ export function loadCustomElementsManifests(
     );
     for (const dep of resolved.resolutionPaths) {
       resolutionPaths.add(dep);
+      adapter.recordResourceDependency?.(dep);
     }
     if (resolved.kind === ManifestResolutionKind.Failed) {
       diagnostics.push(
@@ -112,7 +113,7 @@ export function loadCustomElementsManifests(
     }
     seenManifestPaths.add(resolved.path);
 
-    const content = adapter.readFile(resolved.path);
+    const content = readManifestFile(adapter, resolved.path);
     if (content === undefined) {
       diagnostics.push(
         makeManifestDiagnostic(
@@ -180,6 +181,22 @@ export function loadCustomElementsManifests(
     diagnostics,
     resolutionPaths,
   };
+}
+
+function readManifestFile(adapter: NgCompilerAdapter, path: AbsoluteFsPath): string | undefined {
+  // Only read manifests through `readResource` on hosts that track resource dependencies (the
+  // Language Service), where `readResource` is synchronous and reflects unsaved editor buffers.
+  // CLI/build hosts expose an async `readResource` for templates/styles, so calling it here would
+  // trigger a redundant file read and discard the resulting Promise.
+  if (adapter.recordResourceDependency !== undefined && adapter.readResource !== undefined) {
+    const resource = adapter.readResource(path);
+    if (typeof resource === 'string') {
+      // Tell a missing file (NG4007) from an empty one (NG4008).
+      return resource === '' && !adapter.fileExists(path) ? undefined : resource;
+    }
+    void resource.catch(() => {});
+  }
+  return adapter.fileExists(path) ? adapter.readFile(path) : undefined;
 }
 
 function isInNodeModules(path: string): boolean {

@@ -30,6 +30,7 @@ describe('custom elements manifest type grammar', () => {
       checkType: '"primary" | "danger" | undefined',
       isLiteralUnion: true,
       literalUnionType: '"primary" | "danger"',
+      stringLiteralValues: ['primary', 'danger'],
       isExternal: false,
       usesUnreferencedGlobal: false,
     });
