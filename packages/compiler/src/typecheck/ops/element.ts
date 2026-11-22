@@ -6,6 +6,7 @@
  * found in the LICENSE file at https://angular.dev/license
  */
 
+import {normalizeCustomElementTagName} from '../../schema/custom_elements_manifest_schema';
 import {Element} from '../../render3/r3_ast';
 import {TcbOp} from './base';
 import {TcbExpr} from './codegen';
@@ -47,7 +48,9 @@ export class TcbElementOp extends TcbOp {
         const rawAlias = this.tcb.getCustomElementRawTypeAlias(this.element.name);
         if (rawAlias !== null) {
           this.tcb.useCemHelper('_CemEl');
-          const quotedTag = TcbExpr.quoteAndEscape(this.element.name.toLowerCase());
+          const quotedTag = TcbExpr.quoteAndEscape(
+            normalizeCustomElementTagName(this.element.name),
+          );
           initializer = new TcbExpr(
             `document.createElement(${quotedTag}) as unknown as _CemEl<${rawAlias}, ${quotedTag}>`,
           );

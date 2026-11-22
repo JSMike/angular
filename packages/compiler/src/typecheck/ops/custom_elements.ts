@@ -10,6 +10,7 @@ import {
   CustomElementImportCandidate,
   CustomElementsManifestSchema,
   CustomElementTypeExpr,
+  normalizeCustomElementTagName,
 } from '../../schema/custom_elements_manifest_schema';
 import {CemImportReachability} from '../api';
 import {TcbExpr} from './codegen';
@@ -109,7 +110,7 @@ export function buildCustomElementRawTypeExpr(
   useHelper: (name: CemHelperName) => void,
   getImportReachability?: (specifier: string) => CemImportReachability,
 ): {readonly expr: string; readonly hasGatedClassImport: boolean} {
-  const quotedTag = TcbExpr.quoteAndEscape(tagName.toLowerCase());
+  const quotedTag = TcbExpr.quoteAndEscape(normalizeCustomElementTagName(tagName));
   useHelper('_CemTag');
   const candidates = schema.classImports ?? [];
   const imports: CustomElementImportCandidate[] = [];

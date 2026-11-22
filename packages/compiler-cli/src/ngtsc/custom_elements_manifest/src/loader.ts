@@ -6,7 +6,11 @@
  * found in the LICENSE file at https://angular.dev/license
  */
 
-import {CustomElementsManifestIndex, CustomElementsManifestSchema} from '@angular/compiler';
+import {
+  CustomElementsManifestIndex,
+  CustomElementsManifestSchema,
+  normalizeCustomElementTagName,
+} from '@angular/compiler';
 import ts from 'typescript';
 
 import {NgCompilerAdapter} from '../../core/api';
@@ -145,7 +149,7 @@ export function loadCustomElementsManifests(
     const isAppOwned = resolved.packageName === null && !isInNodeModules(resolved.path);
     const warnings = isAppOwned ? [...parsed.warnings] : [];
     for (const schema of parsed.schemas) {
-      const tag = schema.tagName.toLowerCase();
+      const tag = normalizeCustomElementTagName(schema.tagName);
       const winner = seenTags.get(tag);
       if (winner !== undefined) {
         if (isAppOwned) {

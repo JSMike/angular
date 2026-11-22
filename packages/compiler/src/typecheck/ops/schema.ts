@@ -66,13 +66,30 @@ export class TcbDomSchemaCheckerOp extends TcbOp {
         continue;
       }
 
-      if (isPropertyBinding && binding.name !== 'style' && binding.name !== 'class') {
-        // A direct binding to a property.
-        const propertyName = REGISTRY.getMappedPropName(binding.name);
+      const isManifestTwoWayClass =
+        binding.type === BindingType.TwoWay &&
+        binding.name === 'class' &&
+        isTemplateElement &&
+        element instanceof Element &&
+        (this.tcb.env.config.customElementsManifestIndex?.getSchema(this.getTagName(element)) ??
+          null) !== null;
 
+      if (
+        isPropertyBinding &&
+        binding.name !== 'style' &&
+        (binding.name !== 'class' || isManifestTwoWayClass)
+      ) {
         if (isTemplateElement) {
           const tagName = this.getTagName(element);
           const manifestIndex = this.tcb.env.config.customElementsManifestIndex ?? null;
+          // Custom Elements Manifest properties keep their exact names, such as `readonly`.
+          // Other names map to DOM properties, such as `readOnly`.
+          const propertyName =
+            element instanceof Element &&
+            manifestIndex !== null &&
+            manifestIndex.hasProperty(tagName, binding.name)
+              ? binding.name
+              : REGISTRY.getMappedPropName(binding.name);
           // Defer undeclared identifier properties on manifest custom elements to
           // `TcbUnclaimedInputsOp` so both `HTMLElementTagNameMap` classes (including app-owned
           // manifests) and package class imports are checked against the real element class in
@@ -84,6 +101,7 @@ export class TcbDomSchemaCheckerOp extends TcbOp {
             manifestIndex !== null &&
             manifestIndex.getSchema(tagName) !== null &&
             !manifestIndex.isUnbindableProperty(tagName, propertyName) &&
+            !manifestIndex.isUnbindableProperty(tagName, binding.name) &&
             !REGISTRY.validateProperty(propertyName).error &&
             isValidJsIdentifier(propertyName)
           ) {
@@ -98,6 +116,8 @@ export class TcbDomSchemaCheckerOp extends TcbOp {
             this.tcb.hostIsStandalone,
           );
         } else {
+          // A direct binding to a host property.
+          const propertyName = REGISTRY.getMappedPropName(binding.name);
           this.tcb.domSchemaChecker.checkHostElementProperty(
             this.tcb.id,
             element,

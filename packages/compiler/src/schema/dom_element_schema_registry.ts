@@ -10,7 +10,10 @@ import {CUSTOM_ELEMENTS_SCHEMA, NO_ERRORS_SCHEMA, SchemaMetadata, SecurityContex
 import {isNgContainer, isNgContent, isNgTemplate, splitNsName} from '../ml_parser/tags';
 import {MATH_ML_NAMESPACE, SVG_NAMESPACE} from '../template/pipeline/src/namespaces';
 import {dashCaseToCamelCase} from '../util';
-import {CustomElementsManifestIndex} from './custom_elements_manifest_schema';
+import {
+  CustomElementsManifestIndex,
+  normalizeCustomElementTagName,
+} from './custom_elements_manifest_schema';
 import {checkSecurityContext} from './dom_security_schema';
 import {ElementSchemaRegistry} from './element_schema_registry';
 
@@ -20,7 +23,7 @@ const STRING = 'string';
 const OBJECT = 'object';
 
 function normalizeTagName(tagName: string): string {
-  const tagNameLower = tagName.toLowerCase();
+  const tagNameLower = normalizeCustomElementTagName(tagName);
   const [ns, name] = splitNsName(tagNameLower, false);
 
   return ns === SVG_NAMESPACE || ns === MATH_ML_NAMESPACE ? `:${ns}:${name}` : name;
@@ -599,11 +602,18 @@ export class DomElementSchemaRegistry extends ElementSchemaRegistry {
     }
     const customElement = this.customElementsManifestIndex?.getSchema(normalizedTag) ?? null;
     if (customElement !== null) {
-      const props = new Set<string>(this._schema.get('[htmlelement]')!.keys());
-      for (const property of customElement.properties) {
-        props.add(property.name);
+      const attrs = new Set<string>();
+      for (const prop of this._schema.get('[htmlelement]')!.keys()) {
+        attrs.add(
+          this.customElementsManifestIndex!.hasProperty(normalizedTag, prop)
+            ? prop
+            : (_PROP_TO_ATTR.get(prop) ?? prop),
+        );
       }
-      return Array.from(props).map((prop) => _PROP_TO_ATTR.get(prop) ?? prop);
+      for (const property of customElement.properties) {
+        attrs.add(property.name);
+      }
+      return Array.from(attrs);
     }
     return Array.from(this._schema.get('unknown')!.keys()).map(
       (prop) => _PROP_TO_ATTR.get(prop) ?? prop,
