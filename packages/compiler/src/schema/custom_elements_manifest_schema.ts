@@ -46,6 +46,8 @@ export type CustomElementTypeExpr =
 
 /** Shared structured metadata for a canonical TypeScript type expression parsed from a CEM. */
 export interface CustomElementCheckTypeMetadata {
+  /** Raw manifest type text preserved for editor completions and hover display. */
+  readonly typeText?: string;
   /** Canonical TypeScript type expression parsed from the manifest's closed type grammar. */
   readonly checkType?: CustomElementTypeExpr;
   /** True when `checkType` contains an `import(...)` or `globalThis.*` type reference. */
@@ -71,6 +73,8 @@ export interface CustomElementAttributeSchema extends CustomElementCheckTypeMeta
   readonly name: string;
   /** True when `checkType` is already a pure union of string literals with no external references. */
   readonly checkTypeIsLiteralUnion?: boolean;
+  /** Deduplicated string literal values when the manifest type is a static union of string literals. */
+  readonly stringLiteralValues?: readonly string[];
   /**
    * Linked property name on the element class, used to infer static string-literal attribute
    * values from the element class when the manifest attribute has no usable type.

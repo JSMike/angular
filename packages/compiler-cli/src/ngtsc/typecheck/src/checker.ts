@@ -1526,6 +1526,7 @@ export class TemplateTypeCheckerImpl implements TemplateTypeChecker {
 
     const tagMap = new Map<string, PotentialDirective | null>();
 
+    const customElementsManifestTags = this.config.customElementsManifestIndex?.tagNames;
     for (const tag of this.domSchemaRegistry.allKnownElementNames()) {
       tagMap.set(tag, null);
     }
@@ -1538,9 +1539,22 @@ export class TemplateTypeCheckerImpl implements TemplateTypeChecker {
       }
 
       for (const selector of CssSelector.parse(directive.selector)) {
-        if (selector.element === null || tagMap.has(selector.element)) {
-          // Skip this directive if it doesn't match an element tag, or if another directive has
-          // already been included with the same element name.
+        if (selector.element === null) {
+          // Skip this directive if it doesn't match an element tag.
+          continue;
+        }
+
+        const isPlainElementSelector =
+          selector.attrs.length === 0 &&
+          selector.classNames.length === 0 &&
+          selector.notSelectors.length === 0;
+        const replacesManifestEntry =
+          tagMap.get(selector.element) === null &&
+          customElementsManifestTags?.has(selector.element) === true &&
+          isPlainElementSelector;
+        if (tagMap.has(selector.element) && !replacesManifestEntry) {
+          // Skip this directive if another directive has already been included with the same
+          // element name.
           continue;
         }
 
